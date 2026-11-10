@@ -1,0 +1,42 @@
+# Every key is optional; defaults and explanations are in data/_template.
+pieces: 12
+M: 2
+seed: 0
+sigma: 0.849
+iterations:
+  cmax: 2100
+  joint: 4001
+  sr: 2001
+autofocus:
+  min_m: 0.015
+  max_m: 0.021
+  samples: 100
+kappa:
+  event: 0.0
+  frame: 1.0
+  sog: 0.1
+  bg: 0.0
+  tv: 0.0
+  tv_sr: 0.0
+  tv_object: 0.04
+  laplacian: 0.001
+  event_sr: null
+lr:
+  cmax: 0.01
+  image: 0.004
+  background: 0.0
+  motion: 0.0
+  contrast: 0.001
+  distance: 1.0e-05
+  distance_sr: 2.0e-06
+  sr: 0.01
+schedule:
+  cmax:
+  - 200
+  - 0.9
+  joint:
+  - 500
+  - 0.9
+  sr:
+  - 500
+  - 1.0

@@ -1,0 +1,24 @@
+# Measurement facts only, in SI units.
+dataset:
+  name: holography/usaf_veryclose
+data:
+  file: raw/window.npz
+  sha256: faf324372fa41c9b70b3d5a27d948207bae676d1d43dba4c020195df655775e2
+  layout: frame[y,x]; events xs,ys,ts,ps; no rescaling
+sensor:
+  shape_yx:
+  - 260
+  - 346
+optics:
+  wavelength_m: 6.328e-07
+  pixel_pitch_m: 1.85e-05
+acquisition:
+  window_start_us: 3276296
+  exposure_end_us: 3279295
+  window_us: 100000
+  frame_index: 82
+  exposure_us: 2999
+  event_count: 239118
+  event_time_origin: first selected event; microseconds
+  polarity: 0=negative, 1=positive
+  frame_scale: uint8, 0 to 255

@@ -1,0 +1,31 @@
+{
+  "source": "reference implementation, CPU, five updates per stage",
+  "iterations": {
+    "cmax": 5,
+    "joint": 5,
+    "sr": 5
+  },
+  "seed": 0,
+  "device": "cpu",
+  "threads": 1,
+  "torch": "2.10.0+cu128",
+  "numpy": "2.2.6",
+  "sample": "2D images: 16 linearly spaced integer row/column indices including endpoints; trajectory and scalars complete",
+  "full_array_hashes": {
+    "object_m1": "b85fa57910478ff18a92fbbcd7d1c08c651312606b7ba3f02726de80a8b257dc",
+    "object_sr": "95f7e41b5c7b688a122c986c889861860fac8eb57521abfe299fda8adadcbf28",
+    "latent_m1": "643191f751481368898d0f02bc706d029539aba4f242ecbbe720c307adbd8eec",
+    "latent_sr": "c13469d5cf05237a14c24aa03576b30ab36cfb0ce8a4845f554cf7dadffc95fe",
+    "trajectory": "696df60c38cf506896eab8d439005f6b6e39367c172f5f7160fe5e63920ca0d4",
+    "knots": "696df60c38cf506896eab8d439005f6b6e39367c172f5f7160fe5e63920ca0d4",
+    "background": "da26a0fae1977d692f21652eb6961ee9a830802dec2843d5d65c1f2e62acc762",
+    "c": "7154dee9d7dcfb459e7caf359e7d0f95f5921922cbcb14cd4240724a2f58fd15",
+    "z": "72c0b520be94ffb8895b8aee58fc5f8b9377bb16627a63c9f32f528966259079",
+    "z_m1": "d7d46e5060b5f9e3183096b5639e57ea5c2966948c8302d138e09b89ef0f0d01",
+    "z_autofocus": "89cd42808a4a1f5261b61043c2ba724c2ac9d3b02f333386cebd95eafca36082",
+    "target_m1": "775308057f2e1e82c4ba61a7ca7886b4261c699a02586a851c07424cebdf0dd9",
+    "pred_m1": "14e4556a27fb1c2e91a5b9cfb66b5aeec50adf50576c652f530f736953058d17",
+    "target_sr": "b0c1aa75e55dd34463cca02963f7176c087b147dffabd330122155ba0403d365",
+    "pred_sr": "d9dd7bddc27752de487852ed191d37940edaeac878591aac695c860cceb61bef"
+  }
+}

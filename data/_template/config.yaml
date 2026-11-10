@@ -1,0 +1,32 @@
+# Required measurement facts, illustrated by the supplied USAF window.
+# Replace dataset labels, file, sensor, optics and acquisition with measured facts.
+# No solver setting belongs here. shape_yx means height, width, with row 0 at top.
+# selection_start_us selects the last exposure starting before that time, relative
+# to the recording's first event. window_start_us is the selected exposure start.
+# Saved event ts is instead relative to the first selected event, exactly as load_window.
+# wavelength_m = 632.8 * 1e-9 and pixel_pitch_m = 18.5 * 1e-6 retain source rounding.
+# Optional data.sha256, when present, is enforced by the loader.
+dataset:
+  name: replace_me
+  notes: Replace all acquisition facts with measured values.
+data:
+  file: raw/window.npz
+  layout: frame[y,x]; events xs,ys,ts,ps; no rescaling
+sensor:
+  shape_yx:
+  - 260
+  - 346
+optics:
+  wavelength_m: 6.328e-07
+  pixel_pitch_m: 1.85e-05
+acquisition:
+  selection_start_us: 3300000
+  window_start_us: 3276296
+  exposure_end_us: 3279295
+  window_us: 100000
+  frame_index: 82
+  exposure_us: 2999
+  event_count: 239118
+  event_time_origin: first selected event; microseconds
+  polarity: 0=negative, 1=positive
+  frame_scale: uint8, 0 to 255
