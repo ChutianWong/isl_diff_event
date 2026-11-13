@@ -145,9 +145,11 @@ Limits to keep in mind:
 - The gain in resolution is along the transport. Across it, the result follows the frame and the
   regularizer. The transport of the three examples is 24 px mostly along x, 8 px along x, and
   9 px mostly along y.
-- The zoom box of every figure is placed by a rule and not by hand: it is the window whose event
-  image carries the most energy in the top octave below the sensor Nyquist frequency, which is
-  where the events contribute most.
+- The zoom box of every figure is placed by a rule and not by hand: it is the window in which the
+  event image at M carries the most energy above the sensor Nyquist frequency, after a square
+  root of its magnitude so that the density of fine edges counts and not the contrast of a few
+  strong ones. This score selects a display region from the processed IWE. Every panel of a
+  figure shows the same native pixels.
 
 The release does not contain the comparison methods, the pipelines for the relay, rotation,
 macroscopic and wafer-scanning recordings, or the scripts that drew the figures of the paper. The
@@ -175,7 +177,8 @@ source_data/    the numerical values behind the graphs of the paper
 *`usaf_veryclose` (`summary.png`). A 1951 USAF target in lensless inline holography at 632.8 nm.
 From the left: hologram amplitude, its back-propagation at the autofocus distance, the frame-only
 field at M = 1, the joint field at M = 2 in amplitude and in phase (radians, relative to the mean
-field), and the IWE at M = 2.*
+field), and the IWE at M = 2. The zoom falls on groups 4 and 5 of the target. The lines of group 4
+are 31 to 17.5 µm wide, against a pixel pitch of 18.5 µm.*
 
 <p align="center"><img src="docs/figures/testis.png" alt="Testis tissue: hologram, frame-only field and joint field" width="980"></p>
 

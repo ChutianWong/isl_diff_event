@@ -116,24 +116,31 @@ def show_iwe_panels(solver, roi_zoom):
     return fig
 
 
-def auto_roi(img_lr, hw, hh, band=(0.25, 0.5), margin=6):
-    """Window carrying the most energy in the top octave below the sensor Nyquist, as
-    [[x0, x1], [y1, y0]] in native pixels, and its centre.  The zoom is placed by this rule,
-    not by hand."""
-    X = np.fft.fft2(img_lr - img_lr.mean())
-    fr = np.maximum(np.abs(np.fft.fftfreq(img_lr.shape[0]))[:, None], np.abs(np.fft.fftfreq(img_lr.shape[1]))[None, :])
-    e = np.abs(np.fft.ifft2(X * ((fr > band[0]) & (fr <= band[1])))) ** 2
+def auto_roi(iwe, M, width=60, margin=1):
+    """Zoom window selected by high-frequency energy, as [[x0, x1], [y1, y0]] in
+    native pixels: width native pixels wide, with the aspect ratio of the sensor.
+
+    iwe is the signed image of warped events on the grid M times finer than the sensor.  Its
+    magnitude is compressed by a square root, so that the density of fine edges counts and not
+    the contrast of a few strong ones.  The energy above the sensor Nyquist frequency (the top
+    octave of the grid at M = 1) is then summed over every window of whole native pixels, and
+    the window with the largest sum is taken.  Width and margin shrink to fit smaller sensors.
+    This score selects a display region from the processed IWE."""
+    compressed = np.sign(iwe) * np.sqrt(np.abs(iwe))
+    spectrum = np.fft.fft2(compressed - compressed.mean())
+    fr = np.maximum(np.abs(np.fft.fftfreq(iwe.shape[0]))[:, None], np.abs(np.fft.fftfreq(iwe.shape[1]))[None, :])
+    e = np.abs(np.fft.ifft2(spectrum * (fr > 0.5 / max(M, 2)))) ** 2
+    e = e.reshape(e.shape[0] // M, M, e.shape[1] // M, M).sum((1, 3))
+    margin = min(margin, (min(e.shape) - 1) // 2)
+    width = min(width, e.shape[1] - 2 * margin)
+    height = max(1, min(int(round(width * e.shape[0] / e.shape[1])), e.shape[0] - 2 * margin))
     C = np.zeros((e.shape[0] + 1, e.shape[1] + 1))
     C[1:, 1:] = e.cumsum(0).cumsum(1)
-    ws, hs = int(round(2 * hw)), int(round(2 * hh))
-    best = (-np.inf, margin, margin)
-    for y0 in range(margin, e.shape[0] - hs - margin + 1):
-        for x0 in range(margin, e.shape[1] - ws - margin + 1):
-            v = C[y0 + hs, x0 + ws] - C[y0, x0 + ws] - C[y0 + hs, x0] + C[y0, x0]
-            if v > best[0]:
-                best = (v, x0, y0)
-    cx, cy = best[1] + ws / 2.0, best[2] + hs / 2.0
-    return np.asarray([[cx - hw, cx + hw], [cy + hh, cy - hh]]), (cx, cy)
+    sums = C[height:, width:] - C[:-height, width:] - C[height:, :-width] + C[:-height, :-width]
+    sums = sums[margin:sums.shape[0] - margin, margin:sums.shape[1] - margin]
+    y0, x0 = np.unravel_index(np.argmax(sums), sums.shape)
+    x0, y0 = int(x0) + margin, int(y0) + margin
+    return np.asarray([[x0, x0 + width], [y0 + height, y0]])
 
 
 def _relative_phase(field):
@@ -146,7 +153,7 @@ def save_summary(solver, out):
     import matplotlib.pyplot as plt
     M = solver.sr_magnification
     sensor = solver.event.sensor
-    roi_zoom, _ = auto_roi(np.abs(solver.target_m1.sum(0).cpu().numpy()), 30, 30 * sensor[0] / sensor[1], margin=1)
+    roi_zoom = auto_roi(solver.target_sr.sum(0).cpu().numpy(), M)
     fig = show_panels([(np.sqrt(solver.I_lr.cpu().numpy()), 1, "frame amplitude", False),
                        (solver.backpropagated.abs().cpu().numpy(), 1, "back-propagated", False),
                        (solver.object_m1.abs().cpu().numpy(), 1, "M = 1", False),
@@ -167,8 +174,7 @@ def save_joint_figures(out, arrays, scale):
     import matplotlib.pyplot as plt
     sensor = arrays["frame"].shape
     iwe = [(arrays[key] * arrays["iwe_support"]).sum(0) for key in ("iwe_measured", "iwe_predicted", "iwe_residual")]
-    native_iwe = np.abs(iwe[0]).reshape(sensor[0], scale, sensor[1], scale).mean((1, 3))
-    roi_zoom, _ = auto_roi(native_iwe, 30, 30 * sensor[0] / sensor[1], margin=1)
+    roi_zoom = auto_roi(iwe[0], scale)
     if "object_sr" in arrays:
         native, fine = arrays["object_m1"], arrays["object_sr"]
         panels = [(np.sqrt(arrays["frame"]), 1, "frame amplitude", False),

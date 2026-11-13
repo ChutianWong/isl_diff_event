@@ -276,20 +276,23 @@ def lin_log(x, threshold=1+1e-6):
 
 
 def plot_ax_roi_norm(ax, img, cmap="gray", axis_ind="off", roi=None, M=1, _norm=None):
-    """Show img restricted to roi = [[x0, x1], [y_bottom, y_top]], given in native pixels."""
+    """Show img restricted to roi = [[x0, x1], [y_bottom, y_top]], given in native pixels.
+
+    Native pixel k spans k to k + 1 and covers M x M pixels of an image at M times the native
+    sampling, so panels at different M show the same region."""
     cax = ax.imshow(img, cmap=cmap, norm=_norm)
     if roi is None:
-        roi = [[0, img.shape[1]], [img.shape[0], 0]]
-    ax.set_xlim(np.asarray(roi[0] * M))
-    ax.set_ylim(np.asarray(roi[1] * M))
+        roi = [[0, img.shape[1] / M], [img.shape[0] / M, 0]]
+    ax.set_xlim(np.asarray(roi[0]) * M - 0.5)
+    ax.set_ylim(np.asarray(roi[1]) * M - 0.5)
     ax.axis(axis_ind)
     return cax
 
 
 def add_roi(ax, roi, M=1, color='red'):
     """Outline roi (native pixels) on an image shown at M times the native sampling."""
-    roi_x = np.asarray(roi[0]) * M
-    roi_y = np.asarray(roi[1]) * M
+    roi_x = np.asarray(roi[0]) * M - 0.5
+    roi_y = np.asarray(roi[1]) * M - 0.5
     ax.plot([roi_x[0], roi_x[0], roi_x[1], roi_x[1], roi_x[0]],
             [roi_y[0], roi_y[1], roi_y[1], roi_y[0], roi_y[0]],
             color=color, linestyle='--', linewidth=1.5)
