@@ -1,4 +1,5 @@
-"""Exposure-centred EDI and the original mEDI transfer and video priors."""
+"""Event double integral (EDI) referred to the exposure centre, and the multi-frame (mEDI)
+transfer and video priors that determine the contrast threshold."""
 
 import numpy as np
 import torch
@@ -12,11 +13,8 @@ def bin_events_pos_neg(ts_w, xs_w, ys_w, ps_w, sensor_size, num_bins, duration,
                        device=None):
     """Bilinearly splat events into temporal bins -> pos/neg count volumes.
 
-    Differentiable bilinear splat (same architecture as
-    utils.utility.interpolate_to_image): each event spreads its unit weight to
-    the 4 surrounding pixels by sub-pixel weights, so gradients flow to the event
-    coordinates (needed once events are warped by a learnable flow).  For integer
-    DAVIS coordinates it reduces EXACTLY to nearest-pixel counting.
+    Each event spreads its unit weight to the 4 surrounding pixels by sub-pixel weights.  For
+    integer sensor coordinates this is exactly nearest-pixel counting.
 
     Returns pos_bins, neg_bins : (num_bins, H, W) float tensors on `device`.
     """
@@ -85,9 +83,8 @@ class ExposureEDI(nn.Module):
         I(t)   = I_center * exp(E(t))
         I_blur = mean_t I(t)   =>   I_center = I_blur / mean_t exp(E(t))
 
-    The forward is ALWAYS the plain "rect" mean (optimisation path); smoothing is
-    a render-only concern handled outside this class.  With shared_contrast=True a
-    single threshold c is used (c_pos == c_neg), the paper's global-c model.
+    The exposure average is the plain mean over the bins.  With shared_contrast=True a single
+    threshold c is used for both polarities.
     """
 
     def __init__(self, pos_bins, neg_bins, init_c_pos=0.2, init_c_neg=0.2,
@@ -174,9 +171,8 @@ def edge_correlation_loss(video, event_edge_reference):
 
 def temporal_transfer_loss(I_ref_src, I_ref_dst, pos_transfer, neg_transfer, c_pos, c_neg):
     """Symmetric consistency loss that transports I_ref_src to the next window's
-    centre and matches it against I_ref_dst.  This term is what fixes c.  Do NOT
-    detach I_ref_dst -- both endpoints depend on c, and detaching biases the
-    gradient's stationary point (verified ~1.7% off)."""
+    centre and matches it against I_ref_dst.  This term is what fixes c.  Both endpoints
+    depend on c, so neither is detached."""
     integral = (c_pos * pos_transfer - c_neg * neg_transfer).clamp(-15.0, 15.0)
     I_transported = I_ref_src * torch.exp(integral)
     return torch.mean((I_transported - I_ref_dst) ** 2)
@@ -200,7 +196,7 @@ def build_continuous_video(results, blind_pairs, c_pos, c_neg):
     """Concatenate per-exposure latent stacks + blind bridges into one gap-free,
     step-free video."""
     chunks = []
-    for k, (I_center, video, blur_pred) in enumerate(results):
+    for k, (_, video, _) in enumerate(results):
         chunks.append(video)
         if k < len(results) - 1 and blind_pairs[k] is not None:
             bridge = render_blind_bridge(

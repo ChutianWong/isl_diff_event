@@ -5,7 +5,7 @@
 pieces: 12                 # Linear transport increments over the 100 ms window.
 M: 2                       # Fine-grid factor; this release requires an integer >= 2.
 seed: 0                    # torch.manual_seed before model construction.
-sigma: 0.849               # SR Gaussian splat width; M=1 keeps source SIGMA=0.849.
+sigma: 0.849               # Gaussian splat width of the event image at M; M=1 also uses 0.849.
 
 iterations:
   cmax: 2100               # Event-only contrast maximisation updates.
@@ -20,7 +20,7 @@ autofocus:
 kappa:
   event: 0.0               # M=1 event term is computed but weighted zero; fixed at zero.
   frame: 1.0               # Squared amplitude residual of the measured sharp frame.
-  sog: 0.1                 # Original focus/motion-prior weight; inactive with frozen joint motion.
+  sog: 0.1                 # Focus and motion-prior weight; inactive while the transport is held.
   bg: 0.0                  # Background prior weight; fixed at zero.
   tv: 0.0                  # Sensor-intensity TV at M=1; fixed at zero.
   tv_sr: 0.0               # Sensor-intensity TV at SR; still evaluated with zero multiplier.
@@ -33,7 +33,7 @@ lr:
   image: 0.004             # AdamP rate for the M=1 complex field.
   background: 0.0          # Sharp-frame background held fixed; required zero here.
   motion: 0.0              # Freeze motion after CMax; required zero here.
-  contrast: 0.001          # Original group rate; normalized events and no EDI leave c unfitted.
+  contrast: 0.001          # Rate of c; the normalized event term and a sharp frame give it no gradient.
   distance: 0.00001        # M=1 distance rate, 1e-2 mm per update.
   distance_sr: 0.000002    # SR distance rate, 2e-3 mm per update.
   sr: 0.01                 # AdamP rate for the fine complex field.
@@ -43,14 +43,13 @@ schedule:
   joint: [500, 0.9]        # StepLR.
   sr: [500, 1.0]           # StepLR, no decay.
 
-# Operator conventions retained in the numerical code, not extra solver keys:
-# linear basis, tiles=(1,1), unsigned CMax at t_ref=0, lam=0.4, beta=1e-4;
-# exposure-centre t0=exposure_us//2; signed finite forward stencil, half_shift=True;
-# minimum segment magnitude=0.005 px, initial c=0.2, bounded c in [0.001,0.5];
-# lin_log knee=float(np.float32(1+1e-6)), 255 intensity scale, normalized stack loss;
-# sharp frame edi=False, domain=amplitude, no reblur; reflect-padded propagation;
-# float32 distance, complex64 field, original double-precision propagation;
-# AdamP defaults betas=(0.9,0.999), eps=1e-8, delta=0.1, wd_ratio=0.1,
-# weight_decay=0, nesterov=False; field magnitude projected to [0,1.1].
-# Bilinear SR field amplitude and phase use align_corners=True separately.
-# No omitted PnP, EDI, rotation, dense-flow, pairwise or curriculum mode is exposed.
+# Conventions fixed in the code rather than exposed as keys:
+# linear transport basis; contrast maximisation of the unsigned event image at t_ref=0 with
+# segment prior lam=0.4, beta=1e-4; latent at the exposure centre t0=exposure_us//2;
+# signed finite forward step with its half-step shift; minimum segment magnitude 0.005 px;
+# c=0.2, bounded to [0.001,0.5]; lin_log knee float32(1+1e-6) on the 0 to 255 scale;
+# event stack compared after l2 normalization; sharp frame compared in amplitude;
+# reflect-padded angular-spectrum propagation in double precision, float32 distance,
+# complex64 field; AdamP with betas=(0.9,0.999), eps=1e-8, delta=0.1, wd_ratio=0.1 and no
+# weight decay; field magnitude projected to [0,1.1]; the fine field starts from separate
+# bilinear upsampling of amplitude and phase.

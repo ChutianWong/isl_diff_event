@@ -1,18 +1,36 @@
-"""One seeded CPU reconstruction shared by the equivalence checks."""
-from pathlib import Path
+"""Seeded single-thread CPU reconstructions shared by the reference checks."""
 import pytest
-import torch
-from neurosr import NeuroSR
 
-ROOT = Path(__file__).resolve().parents[1]
-DATASET = ROOT / "data/holography/usaf_veryclose"
+import reference_runs
+
+
+def pytest_addoption(parser):
+    parser.addoption("--bitwise", action="store_true",
+                     help="bit-level comparison with the stored references (see tests/reference_runs.py)")
+
+
+@pytest.fixture(scope="session")
+def bitwise(request):
+    return request.config.getoption("--bitwise")
 
 
 @pytest.fixture(scope="session")
 def cpu_result():
-    previous = torch.get_num_threads()
-    torch.set_num_threads(1)
-    model = NeuroSR.from_directory(DATASET, device="cpu",
-                                   overrides={"iterations": {"cmax": 5, "joint": 5, "sr": 5}})
-    yield model.run()
-    torch.set_num_threads(previous)
+    return reference_runs.holography(reference_runs.FIVE)
+
+
+@pytest.fixture(scope="session")
+def stepped_result():
+    return reference_runs.holography(reference_runs.STEPPED)
+
+
+@pytest.fixture(scope="session", params=reference_runs.SCENES)
+def joint_result(request, tmp_path_factory):
+    scene = request.param
+    return scene, reference_runs.joint(scene, tmp_path_factory.mktemp("joint") / scene)
+
+
+@pytest.fixture(scope="session")
+def stepped_joint_result(tmp_path_factory):
+    with reference_runs.stepped_joint_schedules():
+        return reference_runs.joint("earthworm", tmp_path_factory.mktemp("stepped") / "earthworm")

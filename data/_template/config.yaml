@@ -1,16 +1,16 @@
-# Required measurement facts, illustrated by the supplied USAF window.
-# Replace dataset labels, file, sensor, optics and acquisition with measured facts.
+# Measurement facts of an acquisition, illustrated by the bundled USAF window.
+# tools/make_window.py writes this file, with these keys, when it cuts a window from a recording.
 # No solver setting belongs here. shape_yx means height, width, with row 0 at top.
-# selection_start_us selects the last exposure starting before that time, relative
-# to the recording's first event. window_start_us is the selected exposure start.
-# Saved event ts is instead relative to the first selected event, exactly as load_window.
-# wavelength_m = 632.8 * 1e-9 and pixel_pitch_m = 18.5 * 1e-6 retain source rounding.
-# Optional data.sha256, when present, is enforced by the loader.
+# window_start_us and exposure_end_us are the start and end of the selected exposure, in
+# microseconds after the first event of the recording. The saved event times are relative to the
+# first selected event instead.
+# wavelength_m and pixel_pitch_m are in metres (632.8 nm HeNe, 18.5 um DAVIS346 pitch).
+# data.sha256 is optional; when present, the loader refuses a window file that differs.
 dataset:
-  name: replace_me
-  notes: Replace all acquisition facts with measured values.
+  name: group/name
 data:
   file: raw/window.npz
+  sha256: faf324372fa41c9b70b3d5a27d948207bae676d1d43dba4c020195df655775e2
   layout: frame[y,x]; events xs,ys,ts,ps; no rescaling
 sensor:
   shape_yx:
@@ -20,7 +20,6 @@ optics:
   wavelength_m: 6.328e-07
   pixel_pitch_m: 1.85e-05
 acquisition:
-  selection_start_us: 3300000
   window_start_us: 3276296
   exposure_end_us: 3279295
   window_us: 100000

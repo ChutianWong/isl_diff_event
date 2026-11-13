@@ -1,7 +1,10 @@
 {
+  "source_recording": "recording_001.aedat4",
+  "source_sha256": "1e0732d5c535f24d7a29d81056de521ec0fb2ee4ac933b235e821963647adbed",
   "start_us": 3276296,
   "end_us": 3279295,
   "frame_index": 82,
   "exposure_us": 2999,
-  "events": 239118
+  "events": 239118,
+  "first_event_offset_us": 0
 }

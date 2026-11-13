@@ -1,18 +1,17 @@
-"""Measurement facts and solver defaults for the current dh veryclose path."""
+"""Measurement facts (config.yaml) and solver settings (config_neurosr.yaml) of an acquisition directory."""
 from copy import deepcopy
 from pathlib import Path
 import math
 import yaml
 
-# Defaults keep their binary floating-point rounding.
 DEFAULTS = {
     "pieces": 12, "M": 2, "seed": 0, "sigma": 0.849,
     "iterations": {"cmax": 2100, "joint": 4001, "sr": 2001},
-    "autofocus": {"min_m": 15 * 1e-3, "max_m": 21 * 1e-3, "samples": 100},
+    "autofocus": {"min_m": 0.015, "max_m": 0.021, "samples": 100},
     "kappa": {"event": 0.0, "frame": 1.0, "sog": 1e-1, "bg": 0.0, "tv": 0.0,
               "tv_sr": 0.0, "tv_object": 4e-2, "laplacian": 1e-3, "event_sr": None},
     "lr": {"cmax": 1e-2, "image": 4e-3, "background": 0.0, "motion": 0.0,
-           "contrast": 1e-3, "distance": 1e-2 * 1e-3, "distance_sr": 2e-3 * 1e-3, "sr": 1e-2},
+           "contrast": 1e-3, "distance": 1e-5, "distance_sr": 2e-6, "sr": 1e-2},
     "schedule": {"cmax": [200, 0.9], "joint": [500, 0.9], "sr": [500, 1.0]},
 }
 
@@ -26,7 +25,7 @@ def read_yaml(path):
 
 
 def merge_settings(defaults, overrides):
-    """Merge only documented keys, so omitted experimental modes cannot be selected."""
+    """Merge overrides into defaults, key by key; an unknown key is an error."""
     if not isinstance(overrides, dict):
         raise TypeError("Solver settings must be a mapping")
     result = deepcopy(defaults)
@@ -68,8 +67,8 @@ def load_config(dataset_dir, *, overrides=None):
     for stage, schedule in solver["schedule"].items():
         if len(schedule) != 2 or not isinstance(schedule[0], int) or schedule[0] < 1 or schedule[1] <= 0:
             raise ValueError(f"Invalid StepLR schedule for {stage}")
-    # The release is the frozen-motion holography route, not the omitted general solver.
+    # This route uses the frame alone at M = 1 and holds the transport and background after CMax.
     fixed = {"event": 0.0, "bg": 0.0, "tv": 0.0, "tv_sr": 0.0}
     if any(solver["kappa"][k] != v for k, v in fixed.items()) or solver["lr"]["motion"] != 0 or solver["lr"]["background"] != 0:
-        raise ValueError("The reference solver requires frame-only M=1, fixed motion/background, and zero sensor TV weights")
+        raise ValueError("This route requires frame-only M=1, fixed motion/background, and zero sensor TV weights")
     return {"dataset_dir": directory, "measurement": facts, "solver": solver}

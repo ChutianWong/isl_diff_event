@@ -1,31 +1,110 @@
 {
-  "source": "reference implementation, CPU, five updates per stage",
-  "iterations": {
-    "cmax": 5,
-    "joint": 5,
-    "sr": 5
-  },
-  "seed": 0,
   "device": "cpu",
   "threads": 1,
+  "seed": 0,
+  "updates_per_stage": 5,
+  "python": "3.10.20",
   "torch": "2.10.0+cu128",
   "numpy": "2.2.6",
-  "sample": "2D images: 16 linearly spaced integer row/column indices including endpoints; trajectory and scalars complete",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "machine": "AMD64",
+  "sample": "images: 16 x 16 evenly spaced pixels including the corners; stacks over the transport segments: summed over the segments first; trajectories and scalars: complete",
+  "stepped_schedule": {
+    "cmax": [
+      2,
+      0.5
+    ],
+    "joint": [
+      2,
+      0.5
+    ],
+    "sr": [
+      2,
+      0.5
+    ]
+  },
+  "stepped_joint_schedule": [
+    2,
+    0.5
+  ],
   "full_array_hashes": {
-    "object_m1": "b85fa57910478ff18a92fbbcd7d1c08c651312606b7ba3f02726de80a8b257dc",
-    "object_sr": "95f7e41b5c7b688a122c986c889861860fac8eb57521abfe299fda8adadcbf28",
-    "latent_m1": "643191f751481368898d0f02bc706d029539aba4f242ecbbe720c307adbd8eec",
-    "latent_sr": "c13469d5cf05237a14c24aa03576b30ab36cfb0ce8a4845f554cf7dadffc95fe",
-    "trajectory": "696df60c38cf506896eab8d439005f6b6e39367c172f5f7160fe5e63920ca0d4",
-    "knots": "696df60c38cf506896eab8d439005f6b6e39367c172f5f7160fe5e63920ca0d4",
-    "background": "da26a0fae1977d692f21652eb6961ee9a830802dec2843d5d65c1f2e62acc762",
-    "c": "7154dee9d7dcfb459e7caf359e7d0f95f5921922cbcb14cd4240724a2f58fd15",
-    "z": "72c0b520be94ffb8895b8aee58fc5f8b9377bb16627a63c9f32f528966259079",
-    "z_m1": "d7d46e5060b5f9e3183096b5639e57ea5c2966948c8302d138e09b89ef0f0d01",
-    "z_autofocus": "89cd42808a4a1f5261b61043c2ba724c2ac9d3b02f333386cebd95eafca36082",
-    "target_m1": "775308057f2e1e82c4ba61a7ca7886b4261c699a02586a851c07424cebdf0dd9",
-    "pred_m1": "14e4556a27fb1c2e91a5b9cfb66b5aeec50adf50576c652f530f736953058d17",
-    "target_sr": "b0c1aa75e55dd34463cca02963f7176c087b147dffabd330122155ba0403d365",
-    "pred_sr": "d9dd7bddc27752de487852ed191d37940edaeac878591aac695c860cceb61bef"
+    "cpu_5iter": {
+      "object_m1": "b85fa57910478ff18a92fbbcd7d1c08c651312606b7ba3f02726de80a8b257dc",
+      "object_sr": "95f7e41b5c7b688a122c986c889861860fac8eb57521abfe299fda8adadcbf28",
+      "latent_m1": "643191f751481368898d0f02bc706d029539aba4f242ecbbe720c307adbd8eec",
+      "latent_sr": "c13469d5cf05237a14c24aa03576b30ab36cfb0ce8a4845f554cf7dadffc95fe",
+      "target_m1": "775308057f2e1e82c4ba61a7ca7886b4261c699a02586a851c07424cebdf0dd9",
+      "pred_m1": "14e4556a27fb1c2e91a5b9cfb66b5aeec50adf50576c652f530f736953058d17",
+      "target_sr": "b0c1aa75e55dd34463cca02963f7176c087b147dffabd330122155ba0403d365",
+      "pred_sr": "d9dd7bddc27752de487852ed191d37940edaeac878591aac695c860cceb61bef",
+      "trajectory": "696df60c38cf506896eab8d439005f6b6e39367c172f5f7160fe5e63920ca0d4",
+      "knots": "696df60c38cf506896eab8d439005f6b6e39367c172f5f7160fe5e63920ca0d4",
+      "background": "da26a0fae1977d692f21652eb6961ee9a830802dec2843d5d65c1f2e62acc762",
+      "z": "72c0b520be94ffb8895b8aee58fc5f8b9377bb16627a63c9f32f528966259079",
+      "z_m1": "d7d46e5060b5f9e3183096b5639e57ea5c2966948c8302d138e09b89ef0f0d01",
+      "z_autofocus": "89cd42808a4a1f5261b61043c2ba724c2ac9d3b02f333386cebd95eafca36082",
+      "c": "7154dee9d7dcfb459e7caf359e7d0f95f5921922cbcb14cd4240724a2f58fd15"
+    },
+    "cpu_5iter_stepped": {
+      "object_m1": "adb3dbe62374b49bc986a18dd13a7a9b278eac89bea854b9ccbf31f16b1bbd69",
+      "object_sr": "d18ab82df10c709cacdb65751931d995426c07e1322c2e6d2e3c79c89ad8ed17",
+      "latent_m1": "90f8fe98690044d4eb3dddbf999872404a684c3602cd2c3edd9e3051ef539adc",
+      "latent_sr": "7ecc3d5bd47e7880e1908617fcec1d394f4b08d3d5813b5ac34f34a2585e9ed6",
+      "target_m1": "9516cc517930b28e490ec1cc8ffe87b2b077521c702032b7e47d3bfb7abd1306",
+      "pred_m1": "2860e5db1fc8041ab5d4163d712ce4cc95886f459b718302376a376a525cbe9a",
+      "target_sr": "69f52be7fdd47d133577f1b70bc543add9af7bf5e99c8793275c1018fb152338",
+      "pred_sr": "74af33a40bf21e9cc050f1fe011a8f73ef138458bd32703fd1d1614204636223",
+      "trajectory": "b0829221273e3175e1be614c70862cea74e6174609f000d3e61566ade26aa65f",
+      "knots": "b0829221273e3175e1be614c70862cea74e6174609f000d3e61566ade26aa65f",
+      "background": "da26a0fae1977d692f21652eb6961ee9a830802dec2843d5d65c1f2e62acc762",
+      "z": "d0973dae86eb723dd02c320373cabe1443d89fe315da30686b0ab4a0e02ad44d",
+      "z_m1": "f08b77608a3384878dd4f6b93ce0c8c2bd1d31b5abcd4fbca4bd482249672459",
+      "z_autofocus": "89cd42808a4a1f5261b61043c2ba724c2ac9d3b02f333386cebd95eafca36082",
+      "c": "7154dee9d7dcfb459e7caf359e7d0f95f5921922cbcb14cd4240724a2f58fd15"
+    },
+    "joint_tiny_earthworm": {
+      "edi": "22bf49a92085af1dcdbc94183b62de170d8dea25e43ad2e758263c515e4d0cec",
+      "background": "04fe1bd1f33e7b658bfead52c3fc823d96b51f2797d8cf1cbf4d50fa8fa7d61e",
+      "sr_seed": "628ee0bfd05ac59862c9848a869e0fd2c76288dd4fbd62c7f7ee27209bd09323",
+      "joint": "3a3cabef414657acbc447d493a3a780043a727b5138b990d167dfa66e281943a",
+      "iwe_measured": "eb64f944b9489922ec92a6bd473204ca23b843dd5a2385233640041185739c12",
+      "iwe_predicted": "787f172d63fbef6e05389f3a7b7c8c25fda7156d6ca0ea5110cf124c4cca123a",
+      "iwe_support": "6143d2891b7a62bfe82fda85534991da96d948784b562887a1367f26c6ec4e24",
+      "iwe_residual": "ad5c2fec4f47bb5102c42970f4f13bf67116fc6bc2f5b57c707a37fa30a33607",
+      "intensity_m1": "284333733bddb5e47b2a43b52c966d2af092ff4818a1c8185ffe35a9f7975664",
+      "frame": "c26c2a751e6df571cb722e12cb8cb70d0e175ba1911d4622068864f5fa7ef87d",
+      "segments_px": "f78a4af39fa52e3d0e939ba7a2ca5fc648be8be9b61b7a3a03ce2d8b10dd2591",
+      "contrast": "bd66900a035c9152090ee8e9c8826b1d4bac405d8f22ad0ee0ff7cb55c4390c1"
+    },
+    "joint_tiny_testis": {
+      "edi": "ab41d2419c4e8dac484d2e85438162e7c697efcf4757b7aca9bee855f286584a",
+      "background": "da26a0fae1977d692f21652eb6961ee9a830802dec2843d5d65c1f2e62acc762",
+      "sr_seed": "088c09dfea0f054e95979e7d6e818a2ee5c656cf0477c6d3ac38bf7abb10ea69",
+      "joint": "fa5326a8fb1bf6aa178c986e85add30a33ddce36728f523e014ac6e197ae3641",
+      "iwe_measured": "214ea9211715cafa0fc6123b1ae13e1a55c5d271e020de6b3deb2baf66b6b3be",
+      "iwe_predicted": "82dfe6e9e13f8089f7fa73f354b9128840ba527166c41373c628b69b18f9b7d6",
+      "iwe_support": "eff6600a32b2247d38ea9d0dc4410ba5b87ec2a8a19d92232c481976edb2543c",
+      "iwe_residual": "f98b376b57ef5cf95b6446206753374f8db57248a4311186035f09f9000fc74c",
+      "object_m1": "9643dfd67bafe6ae9c83ba52269ddec1d1202cad706181d407f90d64bef777ac",
+      "object_sr": "692fd43bddac43ae5ab846f034fc3d084d4d2f8f61e5fb0a38310034e4c29eb5",
+      "frame": "ffb05e1671b731206fea0836a971637981d7a9e9ce8035296adf06001384e7eb",
+      "segments_px": "95be694f03358fc960d84600c14edc214619e44e23a9541ea696b9195beff16f",
+      "contrast": "6001330f801aad581408f09e4615f685e2ade5b25aabfac7119a244cebc5e524",
+      "z": "d59f9247168c3da9a00fe3765837bb1ec24b068e00da9f693f0a299768f15abe"
+    },
+    "joint_tiny_stepped_earthworm": {
+      "edi": "22bf49a92085af1dcdbc94183b62de170d8dea25e43ad2e758263c515e4d0cec",
+      "background": "3b359ea43a3944cc8738c0a471f9bc1dceb801a3f79ebe5f3cd835b2c35f83c4",
+      "sr_seed": "45c6dcf56d9863bde73ea41c37fe36b3920d2908774efb7858222735c004c60e",
+      "joint": "1b245996824fb704f2947745246fea2ce9b9702137f5f638d2f873c707a3ccfe",
+      "iwe_measured": "eb64f944b9489922ec92a6bd473204ca23b843dd5a2385233640041185739c12",
+      "iwe_predicted": "5d43fdb09609dfc4ce5e8a31168bea6a161e2b9a1b72ec908eb213eae843043b",
+      "iwe_support": "6143d2891b7a62bfe82fda85534991da96d948784b562887a1367f26c6ec4e24",
+      "iwe_residual": "69a3f38a7aafdc421495a118c697cd882030b8c10bc6ea003fc11d9eaaf3aa51",
+      "intensity_m1": "aa6be34f9b3c6b0918d6b1c65230947947a83acc1fc22c5067825d9d95e9c9fa",
+      "frame": "c26c2a751e6df571cb722e12cb8cb70d0e175ba1911d4622068864f5fa7ef87d",
+      "segments_px": "f78a4af39fa52e3d0e939ba7a2ca5fc648be8be9b61b7a3a03ce2d8b10dd2591",
+      "contrast": "bd66900a035c9152090ee8e9c8826b1d4bac405d8f22ad0ee0ff7cb55c4390c1"
+    }
   }
 }

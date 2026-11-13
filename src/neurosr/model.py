@@ -1,69 +1,62 @@
-"""One experiment object: acquisition, motion, optics and the three original solver stages.
+"""The reconstruction stages on one transport model.
 
-The extracted numerical methods retain their original defaults and comments.
-Only the from_directory/run path, with the settings in data/_template, is supported.
+    cmax    events only: contrast maximisation of the image of warped events gives the transport
+    joint   native scale (M = 1): frame fidelity + event fidelity + priors
+    sr      M > 1: transport, contrast and background fixed; the latent is refined on the fine grid
+
+The latent is the sensor-plane intensity, or with optics the complex object field O whose
+intensity |P_z{O}|^2 reaches the sensor; both fidelity terms act on that common intensity.
 """
 import hashlib
 import json
 import platform
 import time
 from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ._constants import *
 from torch.optim import Adam, lr_scheduler
-from .ops import (AdamP, np_to_torch, tv_loss, tv_loss_flow, down_sampling, l2_loss, reset_optimizer_and_params)
+
+from ._constants import KAPPA, LR, SCHEDULE, SIGMA_SR
+from .ops import AdamP, np_to_torch, tv_loss, tv_loss_flow, reset_optimizer_and_params
 from .motion import SplineFlow, register_segments
 from .events import EventModel
 from .frame import FrameModel
-from .optics import AngularSpectrum, IdentityOptics, laplacian
+from .optics import AngularSpectrum, laplacian
 from .config import load_config
-from .data import load_window_npz
+from .data import load_window_npz, output_directory
+
 
 class NeuroSR:
-    """The reconstruction stages on one motion model.
+    """Transport (flow), event channel, frame channel and, for field recovery, the optics.
 
-    cmax   events only: contrast maximisation at t_ref (default 0 us), knot prior lam = 4e-1
-    joint  M = 1: event residual + focus + knot prior + frame residual + background prior
-    sr     M > 1: motion, c and background frozen; the latent against the SR target
-
-    Times are on the caller's event clock (load_window zeroes it at the window's first event);
-    with a frame the latent sits at the nominal exposure midpoint t0 = win_frame // 2.
-    With optics, optimize u with latent |P_z u|^2 and object priors at both stages; optimize
-    distance when it is learnable and its stage rate is nonzero.  Project |u| to
-    [0, 1.1]; without optics, project intensity to [0, 1.1].  optimizer serves joint and sr.
-    kappa pnp / pnp_sr add the DRUNet prior with the pnp schedule, and its denoised latent replaces
-    the stage's result.
+    Event times are on the caller's clock; the latent sits at the nominal exposure midpoint
+    t0 = win_frame // 2.  With optics the variable is the object field u, the latent is
+    |P_z u|^2, the object priors act at both scales, and the distance is refined when it is
+    learnable and its stage rate is nonzero.  |u|, or the intensity without optics, is
+    projected to [0, 1.1] after every update.  optimizer serves the joint and sr stages.
+    A MultiFrameEDI passed as medi adds its loss to the native-scale objective and must share
+    the contrast parameter of the event model.
     """
 
-    def __init__(self, flow, event, frame, optics=None, t0=None, kappa=KAPPA, lr=LR, schedule=SCHEDULE,
-                 medi=None, medi_weight=1.0, optimizer=Adam, pnp=PNP):
+    def __init__(self, flow, event, frame, optics=None, kappa=KAPPA, lr=LR, schedule=SCHEDULE,
+                 medi=None, medi_weight=1.0, optimizer=Adam):
         self.flow, self.event, self.frame, self.optics = flow, event, frame, optics
-        self.field_optics = optics is not None and not isinstance(optics, IdentityOptics)
-        # the latent sits at the nominal exposure midpoint; t0 is free only without a frame
-        self.t0 = (0 if t0 is None else t0) if frame is None else frame.win_frame // 2
-        if frame is not None and t0 is not None and float(t0) != self.t0:
-            raise ValueError("The EDI latent reference must be the exposure centre")
+        self.t0 = 0 if frame is None else frame.win_frame // 2   # exposure centre; no frame: contrast maximisation only
         if medi is not None and medi.raw_c is not event.raw_c:
             raise ValueError("mEDI and EventModel must share the same raw_c Parameter")
         self.medi, self.medi_weight = medi, float(medi_weight)
-        self.c_init = float(event.contrast.detach())
         self.optimizer = optimizer
         self.kappa = dict(KAPPA, **kappa)
         self.lr = dict(LR, **lr)
         self.schedule = dict(SCHEDULE, **schedule)
-        self.pnp, self.pnp_history = dict(PNP, **pnp), {}
-        if self.field_optics and (self.kappa["pnp"] or self.kappa["pnp_sr"]):
-            raise ValueError("The PnP prior acts on the sensor latent; it has no complex-field form")
         self.history, self.timings = {}, {}
-        self.cmax_focus, self.curriculum, self._cmax_iteration = "variance", [], 0
-        self.latent_sr = self.object_m1 = self.object_sr = None
+        self._cmax_iteration = 0
+        self.latent_m1 = self.latent_sr = self.object_m1 = self.object_sr = None
         self.target_m1 = self.pred_m1 = self.target_sr = self.pred_sr = None
         self.sr_magnification = self.sr_sigma = None
-        self.latent_poisson = self.support_sr = None
-        self.sr_options = {}
 
     def _log(self, stage, iteration, values):
         self.history.setdefault(stage, []).append(dict(iteration=iteration, **values))
@@ -72,17 +65,17 @@ class NeuroSR:
 
     def _latent(self, variable, P):
         """The latent intensity: the variable itself, or |P u|^2 on the sensor."""
-        if P is None or isinstance(P, IdentityOptics):
-            return variable if P is None else P(variable)
+        if P is None:
+            return variable
         U = P(variable)
         return (U * U.conj()).abs()
 
     def _variable(self, I0, P):
         """The latent itself, or the complex64 object field: given, or sqrt(I0) back-propagated
         over the current distance."""
-        if P is None or isinstance(P, IdentityOptics):
+        if P is None:
             if I0.is_complex():
-                raise ValueError("Intensity optics require a real sensor-plane initial latent")
+                raise ValueError("Without optics the initial latent is a real sensor-plane intensity")
             return nn.Parameter(I0.clone().detach(), requires_grad=True)
         if not I0.is_complex():
             with torch.no_grad():
@@ -102,65 +95,35 @@ class NeuroSR:
     def _object_prior(self, I, field):
         """Mean |Laplacian| of the latent hologram and anisotropic TV of the complex field."""
         prior = self.kappa["laplacian"] * (laplacian(I).abs().sum(dim=(-1, -2)) / I.shape[0] / I.shape[1])
-        return prior + self.kappa["tv_object"] * tv_loss(field, tv_order=1, tv_tau=1e-4, iso=False)
-
-    def _image_priors(self, L_tot, I, magnification, stage):
-        """L_tot plus the nonzero image priors of the stage (the _sr weights at SR): iso_tv the
-        isotropic TV and l0 the smooth L0 at spatial scale M, flow_l0 the
-        smooth L0 across the window's net displacement at unit scale."""
-        k, s, M = self.kappa, "_sr" if stage == "sr" else "", int(magnification)
-        if k["iso_tv" + s]:
-            L_tot = L_tot + k["iso_tv" + s] * tv_loss(I, tv_order=1, tv_tau=1e-4, iso=True, spatial_scale=M)
-        if k["l0" + s]:
-            L_tot = L_tot + k["l0" + s] * smooth_l0(I, alpha=30.0, spatial_scale=M)
-        if k["flow_l0" + s]:
-            if not self.flow.uniform:
-                raise ValueError("flow_l0 takes one direction, the net displacement of a uniform path")
-            d = self.flow.segments().sum(0).detach()
-            L_tot = L_tot + k["flow_l0" + s] * smooth_l0_flow(I, alpha=30.0,
-                                                              d_hat=d / (torch.linalg.vector_norm(d) + 1e-9))
-        return L_tot
-
-    def _pnp(self, stage, magnification, iterations):
-        """The DRUNet prior of the stage (function/pnp_prior.py with the pnp schedule), or None."""
-        weight = self.kappa["pnp_sr" if stage == "sr" else "pnp"]
-        if not weight:
-            return None
-
-    def _pnp_finalize(self, prior, variable):
-        """The denoised latent after the last outer step replaces the variable."""
-        if prior is not None:
-            with torch.no_grad():
-                variable.data = prior.finalize_intensity(self.event.log(variable) / np.log(255)).to(variable.dtype)
+        return prior + self.kappa["tv_object"] * tv_loss(field, tv_tau=1e-4, iso=False)
 
     def _project(self, variable):
         with torch.no_grad():
-            if not self.field_optics:
+            if self.optics is None:
                 variable.clamp_(0, 1.1)
             else:
                 variable.copy_(variable.abs().clamp(0, 1.1) * torch.exp(1j * variable.angle()))
 
-    def cmax(self, iterations=2100, lam=4e-1, beta=1e-4, t_ref=0.0, log_every=100,
-             focus="variance", mu=0.0):
+    def cmax(self, iterations=2100, lam=4e-1, beta=1e-4, t_ref=0.0, log_every=100):
+        """Transport from the events alone: maximise the contrast of the image of events warped
+        to t_ref, with a smoothness prior on the segment displacements."""
         start = time.time()
         if self.event.tt.numel() == 0:
             raise ValueError("CMax needs nonempty events")
         for parameter in self.flow.parameters():
             parameter.requires_grad_(True)
-        self.cmax_focus = focus
         offset = self._cmax_iteration
         groups = self.flow.param_groups(self.lr["cmax"])
         optimizer = Adam(groups)
         scheduler = lr_scheduler.StepLR(optimizer, *self.schedule["cmax"])
         for iteration in range(iterations):
             optimizer.zero_grad()
-            loss = self.cmax_objective(lam, beta, t_ref, focus, mu)
+            loss = self.cmax_objective(lam, beta, t_ref)
             if not torch.isfinite(loss):
                 raise FloatingPointError("Nonfinite CMax objective")
             loss.backward()
             optimizer.step()
             scheduler.step()
-            self.flow.project()
             if iteration % log_every == 0:
                 grad = torch.cat([p.grad.reshape(-1) for p in self.flow.parameters()]).mean().item()
                 self._log("cmax", offset + iteration, {"loss": loss.item(), "grad": grad})
@@ -169,20 +132,14 @@ class NeuroSR:
         self.timings["cmax_s"] = time.time() - start
         return self.flow
 
-    def cmax_objective(self, lam=4e-1, beta=1e-4, t_ref=0.0, focus="variance", mu=0.0):
-        """-var(count image warped to t_ref) + knot prior."""
-        if focus == "variance":
-            xw, yw = self.flow.warp(self.event.xt, self.event.yt, self.event.tt, t_ref)
-            data = self.event.focus(xw, yw)
-        elif focus == "secrets":
-            data = self.event.multi_reference_focus(self.flow)
-        else:
-            raise ValueError("focus must be variance or secrets")
-        return data + self.flow.prior(lam, beta, mu)
+    def cmax_objective(self, lam=4e-1, beta=1e-4, t_ref=0.0):
+        """-var(count image warped to t_ref) + segment prior."""
+        xw, yw = self.flow.warp(self.event.xt, self.event.yt, self.event.tt, t_ref)
+        data = self.event.focus(xw, yw)
+        return data + self.flow.prior(lam, beta)
 
-
-    def joint_objective(self, I, lam=2e-1, beta=1e-4, mu=0.0, target=None, field=None):
-        """The M = 1 objective and its parts: event residual, focus, knot prior, frame residual,
+    def joint_objective(self, I, lam=2e-1, beta=1e-4, target=None, field=None):
+        """The M = 1 objective and its parts: event residual, focus, segment prior, frame residual,
         transverse TV (weight 0 by default), background sparsity, and with a given object field
         the object priors.  A supplied target assumes fixed motion and omits its focus and prior."""
         kappa, M = self.kappa, 1
@@ -190,19 +147,17 @@ class NeuroSR:
         if moving:
             xw, yw = self.flow.warp(self.event.xt, self.event.yt, self.event.tt, self.t0)
             target = self.event.target(xw, yw, self.flow, M)
-        L_D, pred, _ = self.event.residual(I, self.flow, M, target)
-        L_F = self.frame.residual(I, M, kernel=self.frame.kernel(self.flow, M, self.t0) if self.frame.reblur else None)
+        L_D, pred, _ = self.event.residual(I, self.flow, target)
+        L_F = self.frame.residual(I, M)
         L_tot = kappa["event"] * L_D
         if moving:
             L_tot = L_tot + kappa["sog"] * self.event.focus(xw, yw)
-            L_tot = L_tot + kappa["sog"] * self.flow.prior(lam, beta, mu)
+            L_tot = L_tot + kappa["sog"] * self.flow.prior(lam, beta)
         L_tot = L_tot + kappa["frame"] * L_F
         if kappa["tv"]:
-            L_tot = L_tot + kappa["tv"] * tv_loss_flow(I, tv_order=1, tv_tau=1e-4, iso=True, spatial_scale=M,
-                                                       direction_weights=self.flow.tv_weights(M))
-        L_tot = self._image_priors(L_tot, I, M, "joint")
+            L_tot = L_tot + kappa["tv"] * tv_loss_flow(I, self.flow.tv_weights(), tv_tau=1e-4, spatial_scale=M)
         L_tot = L_tot + kappa["bg"] * self.frame.prior()
-        if self.field_optics and field is not None:
+        if self.optics is not None and field is not None:
             L_tot = L_tot + self._object_prior(I, field)
         parts = {"event": L_D, "frame": L_F}
         if self.medi is not None and self.medi_weight:
@@ -210,8 +165,9 @@ class NeuroSR:
             L_tot = L_tot + self.medi_weight * parts["medi"]
         return L_tot, parts, target, pred
 
-    def joint(self, I0, iterations=1900, lam=2e-1, beta=1e-4, log_every=100, mu=0.0):
-        """lr["motion"] = 0 holds the motion, and the target is then rendered once."""
+    def joint(self, I0, iterations=1900, lam=2e-1, beta=1e-4, log_every=100):
+        """Native-scale reconstruction from I0.  lr["motion"] = 0 holds the transport, and the
+        event target is then rendered once."""
         start = time.time()
         moving = self.lr["motion"] != 0
         for parameter in self.flow.parameters():
@@ -231,76 +187,53 @@ class NeuroSR:
                   + self._optical_groups(self.lr["distance"]))
         optimizer = self.optimizer(groups)
         scheduler = lr_scheduler.StepLR(optimizer, *self.schedule["joint"])
-        pnp = self._pnp("joint", 1, iterations)
         for iteration in range(iterations):
             optimizer.zero_grad()
             I = self._latent(variable, self.optics)
-            L_tot, parts, target, pred = self.joint_objective(I, lam, beta, mu, fixed_target, variable)
-            if pnp is not None:
-                L_tot = L_tot + pnp.loss(self.event.log(I) / np.log(255), iteration)
+            L_tot, parts, target, pred = self.joint_objective(I, lam, beta, fixed_target, variable)
             if not torch.isfinite(L_tot):
                 raise FloatingPointError("Nonfinite joint objective")
             L_tot.backward()
             optimizer.step()
             scheduler.step()
             self._project(variable)
-            self.flow.project()
             if iteration == 1 or (iteration % log_every == 0 and iteration > 0):
                 self._log("joint", iteration, dict(loss=L_tot.item(),
                           **{key: value.item() for key, value in parts.items()}, c=self.event.contrast.item()))
-        self._pnp_finalize(pnp, variable)
         reset_optimizer_and_params(optimizer, groups)
         self.latent_m1 = self._latent(variable, self.optics).detach()
-        if self.field_optics:
+        if self.optics is not None:
             self.object_m1 = variable.detach().clone()
         with torch.no_grad():
-            _, _, target, pred = self.joint_objective(self.latent_m1, lam, beta, mu, fixed_target, variable)
+            _, _, target, pred = self.joint_objective(self.latent_m1, lam, beta, fixed_target, variable)
         self.target_m1, self.pred_m1 = target.detach(), pred.detach()
         self.timings["joint_s"] = time.time() - start
         return self.latent_m1
 
-    def sr_objective(self, I, magnification, target, contrast, weights, latent, field=None, kernel=None,
-                     anchor=None):
-        """The SR objective at fixed motion, c and background: event residual, frame residual against
-        the fixed MEDI latent, transverse TV along the fixed flow, the other image priors, and with
-        optics the object priors.  A given anchor image replaces the frame residual by
-        |pool(I) - anchor|^2.  sr() optimizes the latent, or the object
-        field and a learnable distance."""
+    def sr_objective(self, I, magnification, target, contrast, weights, latent, field=None):
+        """The SR objective at fixed transport, c and background: event residual, frame residual
+        against the fixed anchor, transverse TV across the fixed transport, and with optics the
+        object priors."""
         kappa, M = self.kappa, int(magnification)
         kappa_event = kappa["event"] if kappa["event_sr"] is None else kappa["event_sr"]
-        L_D, pred, _ = self.event.residual(I, self.flow, M, target, contrast=contrast)
-        if anchor is None:
-            L_F = self.frame.residual(I, M, latent=latent, kernel=kernel)
-        else:
-            L_F = l2_loss(down_sampling(I, M) - anchor)
+        L_D, pred, _ = self.event.residual(I, self.flow, target, contrast=contrast)
+        L_F = self.frame.residual(I, M, latent=latent)
         L_tot = kappa_event * L_D + kappa["frame"] * L_F
-        L_tot = L_tot + kappa["tv_sr"] * tv_loss_flow(I, tv_order=1, tv_tau=1e-4, iso=True, spatial_scale=M,
-                                                      direction_weights=weights)
-        L_tot = self._image_priors(L_tot, I, M, "sr")
-        if self.field_optics and field is not None:
+        L_tot = L_tot + kappa["tv_sr"] * tv_loss_flow(I, weights, tv_tau=1e-4, spatial_scale=M)
+        if self.optics is not None and field is not None:
             L_tot = L_tot + self._object_prior(I, field)
         return L_tot, {"event": L_D, "frame": L_F}, pred
 
-    def sr(self, I_m1, magnification=3, iterations=1000, sigma=SIGMA_SR, log_every=100, init="bilinear",
-           anchor="frame", support=None):
-        """init "nearest" upsamples the M = 1 latent by repetition.  anchor "m1"
-        compares the pooled latent with the M = 1 latent in place of the frame.  support "events" updates
-        only the fine pixels the warped events touch and adds latent_poisson, the latent rebuilt from
-        its gradients between such pixels (EPBA semi-dense support and densification)."""
+    def sr(self, I_m1, magnification=3, iterations=1000, sigma=SIGMA_SR, log_every=100):
+        """Refine on the M-times finer grid from the native result.  The measurement model is
+        unchanged: the events are rendered at the fine scale and the frame is compared after the
+        pixel-aperture average."""
         start = time.time()
         M = int(magnification)
-        if M < 1:
-            raise ValueError("magnification must be a positive integer")
-        if init not in ("bilinear", "nearest") or anchor not in ("frame", "m1") or support not in (None, "events"):
-            raise ValueError("init bilinear/nearest, anchor frame/m1, support None/events")
-        self.sr_options = dict(init=init, anchor=anchor, support=support)
+        if M < 2:
+            raise ValueError("magnification must be an integer >= 2")
         self.sr_magnification = M
-        self.sr_sigma = self.event.sigma if M == 1 else float(sigma)
-        if M == 1:
-            self.latent_sr = I_m1.detach().clone()
-            self.target_sr, self.pred_sr = self.target_m1, self.pred_m1
-            self.timings["sr_s"] = 0.0
-            return self.latent_sr
+        self.sr_sigma = float(sigma)
         H, Wd = self.event.sensor
         for parameter in (*self.flow.parameters(), self.event.raw_c, self.frame.background):
             parameter.requires_grad_(False)
@@ -308,21 +241,13 @@ class NeuroSR:
             xw, yw = self.flow.warp(self.event.xt, self.event.yt, self.event.tt, self.t0)
             target = self.event.target(xw, yw, self.flow, M, sigma=sigma)
             contrast = self.event.contrast.detach()
-            weights = self.flow.tv_weights(M)
+            weights = self.flow.tv_weights()
             latent = self.frame.latent().detach()
-            kernel = self.frame.kernel(self.flow, M, self.t0) if self.frame.reblur and anchor == "frame" else None
-            if init == "bilinear":
+            if self.object_m1 is None:
                 I0 = F.interpolate(I_m1[None, None], size=(H * M, Wd * M), mode="bilinear",
                                    align_corners=False).squeeze()
-            else:
-                I0 = F.interpolate(I_m1[None, None], size=(H * M, Wd * M), mode="nearest").squeeze()
-            mask = None
-            if support == "events":
-                mask = (events_to_image_torch(*self.event.fine(xw, yw, M), self.event.pt, (H * M, Wd * M),
-                                              device=self.event.device, polar=False) > 0).float()
-        anchor_image = I_m1.detach() if anchor == "m1" else None
         # the same field of view on an M-times finer pitch; the distance Parameter is shared
-        P = self.optics.at_scale(M) if isinstance(self.optics, AngularSpectrum) else self.optics
+        P = self.optics.at_scale(M) if self.optics is not None else None
         if self.object_m1 is not None:
             # amplitude and phase upsampled separately
             u, size = self.object_m1, (H * M, Wd * M)
@@ -333,44 +258,33 @@ class NeuroSR:
         groups = [{"params": variable, "lr": self.lr["sr"]}] + self._optical_groups(self.lr["distance_sr"])
         optimizer = self.optimizer(groups)
         scheduler = lr_scheduler.StepLR(optimizer, *self.schedule["sr"])
-        pnp = self._pnp("sr", M, iterations)
         for iteration in range(iterations):
             optimizer.zero_grad()
             I = self._latent(variable, P)
-            L_tot, parts, pred = self.sr_objective(I, M, target, contrast, weights, latent, variable, kernel,
-                                                   anchor_image)
-            if pnp is not None:
-                # on the event pixel's response
-                L_tot = L_tot + pnp.loss(self.event.log(self.event.response(I, M)) / np.log(255), iteration)
+            L_tot, parts, pred = self.sr_objective(I, M, target, contrast, weights, latent, variable)
             if not torch.isfinite(L_tot):
                 raise FloatingPointError("Nonfinite SR objective")
             L_tot.backward()
-            if mask is not None:
-                variable.grad *= mask
             optimizer.step()
             scheduler.step()
             self._project(variable)
             if iteration == 1 or (iteration % log_every == 0 and iteration > 0):
                 self._log("sr", iteration, {"loss": L_tot.item(), "event": parts["event"].item(),
                                             "frame": parts["frame"].item()})
-        self._pnp_finalize(pnp, variable)
         reset_optimizer_and_params(optimizer, groups)
         self.latent_sr = self._latent(variable, P).detach()
-        if self.field_optics:
+        if self.optics is not None:
             self.object_sr = variable.detach().clone()
         with torch.no_grad():
-            _, _, pred = self.sr_objective(self.latent_sr, M, target, contrast, weights, latent, variable, kernel,
-                                           anchor_image)
+            _, _, pred = self.sr_objective(self.latent_sr, M, target, contrast, weights, latent, variable)
         self.target_sr, self.pred_sr = target.detach(), pred.detach()
-        if mask is not None:
-            self.support_sr = mask
-            self.latent_poisson = torch.from_numpy(poisson_densify(self.latent_sr.cpu().numpy(), mask.cpu().numpy()))
         self.timings["sr_s"] = time.time() - start
         return self.latent_sr
 
     @classmethod
     def from_directory(cls, dataset_dir, *, device="cpu", overrides=None):
-        """Read measurement facts and optional solver settings for the dh acquisition.
+        """Build the holography solver of one acquisition directory: measurement facts from
+        config.yaml, optional solver settings from config_neurosr.yaml.
 
         CPU is the default device. Use device="cuda:0" for CUDA.
         """
@@ -417,7 +331,7 @@ class NeuroSR:
         return self
 
     def arrays(self):
-        """Named arrays use the original solver save convention for trajectory [K,2]."""
+        """Named result arrays; trajectory holds the [K, 2] segment displacements."""
         arrays = {name: getattr(self, name).detach().cpu().numpy() for name in
                   ("object_m1", "object_sr", "latent_m1", "latent_sr", "target_m1", "pred_m1", "target_sr", "pred_sr")}
         arrays.update(trajectory=self.flow.segments().detach().cpu().numpy(),
@@ -429,11 +343,9 @@ class NeuroSR:
         return arrays
 
     def save(self, out):
-        """Write arrays, source/settings provenance, and both dh summary figures outside data/."""
-        out = Path(out).expanduser().resolve()
-        data_roots = (Path(__file__).resolve().parents[2] / "data", self.config["dataset_dir"])
-        if any(out == root or root in out.parents for root in data_roots):
-            raise ValueError("Reconstruction output must be outside data/ and the acquisition directory")
+        """Write the arrays, the provenance of inputs, code and settings, and both summary
+        figures, outside data/."""
+        out = output_directory(out, self.config["dataset_dir"])
         out.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(out / "reconstruction.npz", **self.arrays())
         source_files = sorted(Path(__file__).resolve().parent.glob("*.py"))
@@ -454,7 +366,7 @@ class NeuroSR:
                         z_sr_m=self.optics.distance.item(), c=float(self.event.contrast.detach()),
                         flow=self.flow.state(), timings=self.timings, history=self.history,
                         autofocus_scores=self.autofocus_scores.tolist())
-        (out / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8", newline="\n")
         from .visualize import save_summary
         save_summary(self, out)
         return out

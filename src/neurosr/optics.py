@@ -1,33 +1,22 @@
-"""Angular-spectrum propagation; lengths are metres and fields are complex.
+"""Object-to-sensor map of inline holography: I = |P_z{O}|^2 by the angular spectrum.
 
-IdentityOptics is retained as the original solver type-check sentinel.
+Lengths are metres and fields are complex.  The propagation distance z is a parameter of the
+model and can be refined together with the field.
 """
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ._constants import *
 
-class IdentityOptics(nn.Module):
-    """Identity on sensor-plane intensity, already formed by the imaging system.
-
-    This representation does not assert a particular relay, objective or magnification.
-    It is separate from the displacement model and the event generative model.
-    """
-
-    def forward(self, intensity):
-        if intensity.is_complex():
-            raise ValueError("IdentityOptics expects sensor-plane intensity, not a complex field")
-        return intensity
-
-    def at_scale(self, magnification):
-        return self
+from ._constants import SENSOR
 
 
 class AngularSpectrum(nn.Module):
     """Free-space propagation by the angular spectrum, reflect padded by a quarter on each side.
-    I = |P_z u|^2 is then the latent the sensor sees.  The distance is
-    a float32 parameter, and a distance passed to forward is taken in float64."""
+
+    The transfer function is exp(j 2 pi z / lambda sqrt(1 - lambda^2 |f|^2)); the square root
+    is clamped at zero, so evanescent frequencies pass unchanged.  The distance is a float32
+    parameter, and a distance passed to forward is taken in float64."""
 
     def __init__(self, wavelength, pitch, sensor=SENSOR, distance=0.0, pad=True, device="cuda",
                  learn_distance=False):
@@ -72,9 +61,8 @@ class AngularSpectrum(nn.Module):
         return new
 
     def autofocus(self, frame, distances):
-        """Sets the distance to the one whose back-propagated intensity has the largest spread of
-        its absolute Laplacian, and
-        returns it with the scores."""
+        """Set the distance to the one whose back-propagated intensity has the largest spread of
+        its absolute Laplacian, and return it with the scores."""
         I = frame.float() / (frame.float().max() + 1e-8)
         u = torch.sqrt(I)
         scores = []
@@ -88,9 +76,8 @@ class AngularSpectrum(nn.Module):
 
 
 def laplacian(I):
-    """kornia.filters.laplacian(I, 3): the 3 x 3 Laplacian divided by 16, reflect padded."""
+    """The 3 x 3 Laplacian (centre -8, neighbours 1) divided by 16, reflect padded; the same
+    filter as kornia.filters.laplacian(I, 3)."""
     kernel = torch.ones(3, 3, dtype=I.dtype, device=I.device)
     kernel[1, 1] = -8
     return F.conv2d(F.pad(I[None, None], (1, 1, 1, 1), mode="reflect"), (kernel / 16)[None, None])[0, 0]
-
-

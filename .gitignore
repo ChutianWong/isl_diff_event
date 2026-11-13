@@ -3,3 +3,10 @@ __pycache__/
 .venv/
 results/
 *.egg-info/
+build/
+dist/
+*.pyc
+*.aedat4
+.idea/
+.vscode/
+.DS_Store

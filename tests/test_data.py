@@ -47,6 +47,50 @@ def test_missing_solver_file_and_nested_keys_use_defaults(tmp_path):
     assert settings["lr"] == DEFAULTS["lr"]
 
 
-def test_omitted_modes_cannot_be_selected():
+def test_unknown_solver_keys_are_rejected():
     with pytest.raises(KeyError, match="Unsupported solver key"):
         merge_settings(DEFAULTS, {"kappa": {"pnp": 0.6}})
+
+
+def test_window_that_disagrees_with_config_is_named(tmp_path):
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw/window.npz").write_bytes((DATASET / "raw/window.npz").read_bytes())
+    facts = (DATASET / "config.yaml").read_text(encoding="utf-8").replace("frame_index: 82", "frame_index: 83")
+    (tmp_path / "config.yaml").write_text(facts, encoding="utf-8")
+    with pytest.raises(ValueError, match="frame_ind = 82 against 83"):
+        load_window_npz(load_config(tmp_path))
+
+
+JOINT_WINDOW = DATASET.parents[1] / "joint/earthworm.npz"
+
+
+@pytest.mark.parametrize("arguments", [
+    [str(DATASET), "--output", str(DATASET / "output")],
+    [str(DATASET), "--output", str(DATASET.parents[1] / "output")],
+    ["joint", str(JOINT_WINDOW), "--output", str(JOINT_WINDOW.parent / "output")],
+])
+def test_command_line_refuses_output_inside_data(arguments, monkeypatch, capsys):
+    from neurosr import __main__ as cli
+    monkeypatch.setattr("sys.argv", ["neurosr", *arguments, "--tiny", "--device", "cpu"])
+    with pytest.raises(SystemExit):
+        cli.main()
+    assert "outside data/" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("arguments", [[str(DATASET)], ["joint", str(JOINT_WINDOW)]])
+def test_command_line_refuses_an_existing_output(arguments, tmp_path, monkeypatch, capsys):
+    from neurosr import __main__ as cli
+    monkeypatch.setattr("sys.argv", ["neurosr", *arguments, "--output", str(tmp_path), "--tiny", "--device", "cpu"])
+    with pytest.raises(SystemExit):
+        cli.main()
+    assert "choose a new output directory" in capsys.readouterr().err
+
+
+def test_joint_presets_have_a_recording():
+    """Every solver preset names its recording in the tool that cuts its window."""
+    import ast
+    from neurosr.joint_demo import PRESETS
+    source = (DATASET.parents[2] / "tools/make_joint_window.py").read_text(encoding="utf-8")
+    assignment = next(node for node in ast.parse(source).body
+                      if isinstance(node, ast.Assign) and node.targets[0].id == "RECORDINGS")
+    assert set(ast.literal_eval(assignment.value)) == set(PRESETS)

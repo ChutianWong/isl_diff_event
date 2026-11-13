@@ -1,33 +1,31 @@
-"""Low-level operations: event images, intensity mapping, optimizers, registration and propagation.
+"""Numerical building blocks: event images, the log response, losses and priors, registration.
 
-Array axes are y,x; event coordinates are x,y; times are microseconds.
-Ni Chen's optimizer header and complex-valued AdamP modifications are retained.
+Arrays are indexed [y, x]; event coordinates are (x, y) in sensor pixels; times are microseconds.
+Functions derived from third-party code are marked where they are defined; see
+THIRD_PARTY_NOTICES.md.
 """
 from __future__ import annotations
 
 import gc
 import math
-from typing import Optional, Union
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.optimizer import Optimizer
 from skimage.registration import phase_cross_correlation
 
-ArrayLike = Union[np.ndarray, torch.Tensor]
-C_MIN, C_MAX = 1e-3, 0.5
+C_MIN, C_MAX = 1e-3, 0.5      # admissible range of the contrast threshold c
 
-# optimizer for inverse diffraction imaging.
-# @author: Ni Chen
 
-def  time_window(xs, ys,ts, ps ,s , win ):
+def time_window(xs, ys, ts, ps, s, win):
+    """The events with s <= t <= s + win."""
     loc = np.where((ts <= s + win) & (ts >= s))
     ts, xs, ys, ps = ts[loc], xs[loc], ys[loc], ps[loc]
     return xs, ys, ts, ps
 
 
-def np_to_torch(xs, ys, ts, ps,device):
+def np_to_torch(xs, ys, ts, ps, device):
+    """Float tensors on device; the time axis restarts at the first event."""
     xt, yt, tt, pt = torch.from_numpy(xs), torch.from_numpy(ys), torch.from_numpy(ts), torch.from_numpy(ps)
     xt = xt.float().to(device)
     yt = yt.float().to(device)
@@ -69,31 +67,20 @@ def gaussian_interpolate_to_image_rot_flow(
     kernel_size=(7, 7),
 ):
     """
-    Flow-ROTATED anisotropic Gaussian splatting (per-event normalized).
+    Accumulate events into img with a Gaussian whose axes follow the flow (per-event normalized).
 
-    Same contract as gaussian_interpolate_to_image_flow, but the kernel's
-    principal axes follow the flow instead of the image axes: sigma_along is
-    the std along flow_dir and sigma_across the std perpendicular to it, both
-    in pixels of img.  With flow_dir = (1, 0) it equals
-    gaussian_interpolate_to_image_flow(..., sigma_xy=(sigma_along, sigma_across)),
-    with flow_dir = (0, 1) it equals sigma_xy=(sigma_across, sigma_along).
-    flow_dir is a length-2 tensor (x, y); its norm and sign do not matter
-    (a zero vector falls back to the x axis).
-    Differentiable in dxs, dys, interp_weights, sigma_along, sigma_across and
-    flow_dir.  The rotated kernel is not separable, so the [N, Kx, Ky]
-    weights are formed directly (same memory order as the separable version).
-    Boundary handling: simple clipping (no post-clip renormalization).
-    The window is square in image axes, so an oblique ellipse is truncated
-    less than an axis-aligned one: with the shared (2*sigma*M+1) window the
-    rendered across std is 1.40 HR px axis-aligned and 1.48 HR px at 45 deg
-    for a nominal 1.5 (the isotropic reference renders 1.40).
+    Each event at integer pixel (pxs, pys) with sub-pixel offset (dxs, dys) spreads its weight
+    interp_weights over a kernel_size window.  sigma_along is the standard deviation along
+    flow_dir and sigma_across the one perpendicular to it, both in pixels of img.  flow_dir is a
+    length-2 tensor (x, y); its norm and sign do not matter, and a zero vector falls back to the
+    x axis.  Differentiable in dxs, dys, interp_weights, the two widths and flow_dir.
+    Contributions outside the image are clipped without renormalization.  The window is square
+    in image axes, so an oblique ellipse is truncated less than an axis-aligned one.
     """
     device = pxs.device
     img_h, img_w = img.shape
 
-    # ------------------------------------------------------------------
     # 1. Kernel offsets (integer for indexing, real for the weights)
-    # ------------------------------------------------------------------
     kx, ky = kernel_size
     rx = (kx - 1) // 2
     ry = (ky - 1) // 2
@@ -105,9 +92,7 @@ def gaussian_interpolate_to_image_rot_flow(
     Ky = offsets_yi.numel()
     K2 = Kx * Ky
 
-    # ------------------------------------------------------------------
     # 2. Rotated Gaussian kernel (per-event), axes along / across the flow
-    # ------------------------------------------------------------------
     u = torch.as_tensor(flow_dir).to(device=device, dtype=dxs.dtype).reshape(2)
     if float(torch.linalg.norm(u.detach())) <= 1e-12:
         u = torch.tensor([1.0, 0.0], device=device, dtype=dxs.dtype)
@@ -125,9 +110,7 @@ def gaussian_interpolate_to_image_rot_flow(
     # Per-event normalization in the kernel domain.
     w = w / (w.sum(dim=(1, 2), keepdim=True) + 1e-12)
 
-    # ------------------------------------------------------------------
     # 3. Pixel coordinates (expand to event-pixel domain)
-    # ------------------------------------------------------------------
     pxs_b = pxs[:, None] + offsets_xi[None, :]     # [N, Kx]
     pys_b = pys[:, None] + offsets_yi[None, :]     # [N, Ky]
 
@@ -137,9 +120,7 @@ def gaussian_interpolate_to_image_rot_flow(
     w = w.reshape(-1)                              # [N*K2]
     interp_w = interp_weights.repeat_interleave(K2)
 
-    # ------------------------------------------------------------------
     # 4. Boundary mask (simple clipping)
-    # ------------------------------------------------------------------
     valid = (
         (pxs_b >= 0) & (pxs_b < img_w) &
         (pys_b >= 0) & (pys_b < img_h)
@@ -150,9 +131,7 @@ def gaussian_interpolate_to_image_rot_flow(
     w = w[valid]
     interp_w = interp_w[valid]
 
-    # ------------------------------------------------------------------
     # 5. Accumulate
-    # ------------------------------------------------------------------
     img.index_put_(
         (pys_b, pxs_b),
         interp_w * w,
@@ -162,81 +141,59 @@ def gaussian_interpolate_to_image_rot_flow(
     return img
 
 
-def window_event_to_img(xs, ys, ts, ps,sensor_size,s=int(1 / 60 * 12 * 1e6), win=int(1 / 60 * 3 * 1e6), polar = True):
-    xs_win, ys_win, ts_win, ps_win = time_window(xs, ys, ts, ps, s,
-                                                 win)
-    img = events_to_image(xs_win, ys_win, ps_win,
-                          sensor_size, interpolation='bilinear', polar = polar)
+def window_event_to_img(xs, ys, ts, ps, sensor_size, s, win, polar=True):
+    """Event image of the events with s <= t <= s + win, as a numpy array."""
+    xs_win, ys_win, _, ps_win = time_window(xs, ys, ts, ps, s, win)
+    img = events_to_image(xs_win, ys_win, ps_win, sensor_size, polar=polar)
     return img
 
 
 # Wrapper of the event_utils-derived bilinear interpolation; see THIRD_PARTY_NOTICES.md
-def events_to_image_torch(xt, yt, pt, image_size,polar= False,
-                          device=None):
+def events_to_image_torch(xt, yt, pt, image_size, polar=False, device=None):
+    """Bilinear event image: counts, or with polar the signed sum of polarities (0 counts as -1)."""
     if device is None:
         device = xt.device
-    img_size = (image_size[0] , image_size[1])
-    # mask = ((xt <= clipx) & (xt > 0)) & ((yt <= clipy) | (yt > 0))
+    img_size = (image_size[0], image_size[1])
     img = torch.zeros(img_size).to(device).float()
     pxs = (xt.floor()).float()
     pys = (yt.floor()).float()
-    dxs = (xt - pxs).float()#[mask]
-    dys = (yt - pys).float()#[mask]
-    pxs = pxs.long()#[mask]
-    pys = pys.long()#[mask]
+    dxs = (xt - pxs).float()
+    dys = (yt - pys).float()
+    pxs = pxs.long()
+    pys = pys.long()
 
     if polar == False:
         interp_weights = torch.ones_like(pt)
     else:
-        npt = pt.clone()#[mask]
+        npt = pt.clone()
         npt[torch.where(npt == 0)] = -1
         interp_weights = npt
-    img=interpolate_to_image(pxs, pys, dxs, dys, interp_weights , img)
+    img = interpolate_to_image(pxs, pys, dxs, dys, interp_weights, img)
     return img
 
 
 # Wrapper of the event_utils-derived bilinear interpolation; see THIRD_PARTY_NOTICES.md
-def events_to_image(xs, ys, ps, sensor_size=(180, 240), interpolation='bilinear', polar =False,padding=False):
-    """
-    Place events into an image using numpy
-    """
-    if interpolation == 'bilinear' and xs.dtype is not torch.long and xs.dtype is not torch.long:
-        xt, yt, pt = torch.from_numpy(xs), torch.from_numpy(ys), torch.from_numpy(ps)
-        xt, yt, pt = xt.float(), yt.float(), pt.float()
-        img = events_to_image_torch(xt, yt, pt,sensor_size, polar)
-        img = img.numpy()
-        img[np.argmax(img) // sensor_size[1], np.argmax(img) % sensor_size[1]] = 0
-    else:
-        coords = np.stack((ys, xs))
-        try:
-            abs_coords = np.ravel_multi_index(coords, sensor_size)
-        except ValueError:
-            print("Issue with input arrays! coords.shape={}, sum(coords)={}, sensor_size={}. \n minx={}, maxx={}, miny={}, maxy={}".format(coords.shape, np.sum(coords), sensor_size, np.min(xs), np.max(xs), np.min(ys), np.max(ys)))
-            raise ValueError
-        if polar == True:
-            img = np.bincount(abs_coords, weights=ps, minlength=sensor_size[0] * sensor_size[1])
-        else:
-            img = np.bincount(abs_coords, weights=np.ones(ps.size), minlength=sensor_size[0]*sensor_size[1])
+def events_to_image(xs, ys, ps, sensor_size, polar=False):
+    """Bilinear event image of numpy events; its brightest pixel is then set to zero."""
+    xt, yt, pt = torch.from_numpy(xs), torch.from_numpy(ys), torch.from_numpy(ps)
+    xt, yt, pt = xt.float(), yt.float(), pt.float()
+    img = events_to_image_torch(xt, yt, pt, sensor_size, polar)
+    img = img.numpy()
+    img[np.argmax(img) // sensor_size[1], np.argmax(img) % sensor_size[1]] = 0
     img = img.reshape(sensor_size)
     return img
 
 
 def Rot_Flow_Gau_events_to_image_torch_sr(xt, yt, pt, image_size, M, flow_xy=torch.tensor([1.0, 0.0]), sigma=1,
                                           device=None, polar=False, min_flow_mag=0.1):
-    """Flow-shaped Gaussian splat whose narrow axis follows the SIGNED flow vector.
+    """Event image on the M-times finer grid, splatted with a Gaussian shaped by the transport.
 
-    Same call as Flow_Gau_events_to_image_torch_sr, but flow_xy is the signed
-    (x, y) displacement (its direction matters, its sign and norm do not) and
-    the anisotropy is rotated to it: sigma / 2 HR px along the flow (the width
-    the per-axis version gives its dominant axis) and M * sigma / 2 HR px
-    across the flow.  Identical to Flow_Gau_events_to_image_torch_sr when
-    flow_xy is axis aligned.  For oblique flow the per-axis version narrows
-    BOTH axes (45 deg motion gets (sigma/2, sigma/2) and renders as a nearest
-    splat); this one keeps the across-flow width.  A displacement shorter than
-    min_flow_mag sensor px (default 0.1) carries no usable direction and no
-    sub-pixel sampling along it, so it falls back to the isotropic
-    M * sigma / 2 kernel (the per-axis version does the same only at 1e-5).
-    Differentiable in xt, yt (through the sub-pixel offsets), pt and flow_xy.
+    Sub-pixel sampling is gained along the motion only, so the kernel is narrow along flow_xy
+    (sigma / 2 fine px) and wide across it (M * sigma / 2 fine px).  flow_xy is the (x, y)
+    displacement of the segment in sensor px; only its direction is used.  A displacement
+    shorter than min_flow_mag carries no usable direction and falls back to the isotropic
+    M * sigma / 2 kernel.  The image is scaled by M.  Differentiable in xt, yt (through the
+    sub-pixel offsets), pt and flow_xy.
     """
     if device is None:
         device = xt.device
@@ -260,7 +217,7 @@ def Rot_Flow_Gau_events_to_image_torch_sr(xt, yt, pt, image_size, M, flow_xy=tor
         interp_weights = npt
     sigma_across = M * sigma / 2
     if float(flow_xy.detach().float().norm()) < min_flow_mag:   # direction below min_flow_mag px is noise
-        sigma_along = sigma_across                       # isotropic, like Gau_events_to_image_torch_sr
+        sigma_along = sigma_across                       # isotropic
         flow_dir = torch.tensor([1.0, 0.0], device=device)
     else:
         sigma_along = sigma / 2
@@ -279,7 +236,8 @@ def Rot_Flow_Gau_events_to_image_torch_sr(xt, yt, pt, image_size, M, flow_xy=tor
 def Rot_Flow_Gau_events_to_image_torch_sr_segments(
         xt, yt, tt, pt, image_size, segment_boundaries, M, Dxy_pc,
         sigma=1, device=None, polar=False, min_flow_mag=0.1):
-    """Rot_Flow_Gau_events_to_image_torch_sr per trajectory segment, flow_xy = Dxy_pc[i] (signed)."""
+    """One transport-shaped event image per trajectory segment, [K, M H, M W]; Dxy_pc [K, 2]
+    holds the segment displacements in sensor px."""
     boundaries = segment_boundaries.to(device=tt.device, dtype=tt.dtype)
     segment_iwes = []
     for i in range(boundaries.numel() - 1):
@@ -313,46 +271,39 @@ def lin_log(x, threshold=1+1e-6):
         x = x.double()
     rounding = 1e-8
     f = (1./threshold) * math.log(threshold)
-    #y = torch.where(x <= threshold, x*f, torch.log(x))
     y = torch.where(x <= threshold, x * f, torch.log(x+rounding))
-    # important, we do a floating point round to some digits of precision
-    # to avoid that adding threshold and subtracting it again results
-    # in different number because first addition shoots some bits off
-    # to never-never land, thus preventing the OFF events
-    # that ideally follow ON events when object moves by
-    # rounding = 1e8
-    # y = torch.round(y*rounding)/rounding
-
-    #return y.float()
     return y
 
 
-def plot_ax_roi_norm(ax, img, cmap = "gray", axis_ind = "off", roi = None, Dxy_ori =np.asarray([[0,0],[0,0]]), M = 1,_norm= None):
+def plot_ax_roi_norm(ax, img, cmap="gray", axis_ind="off", roi=None, M=1, _norm=None):
+    """Show img restricted to roi = [[x0, x1], [y_bottom, y_top]], given in native pixels."""
     cax = ax.imshow(img, cmap=cmap, norm=_norm)
     if roi is None:
-        roi = [[0,img.shape[1]],[img.shape[0], 0]]
-    ax.set_xlim(np.asarray(roi[0] * M) + np.asarray(Dxy_ori[0]));
-    ax.set_ylim(np.asarray(roi[1] * M) + np.asarray(Dxy_ori[1]));
+        roi = [[0, img.shape[1]], [img.shape[0], 0]]
+    ax.set_xlim(np.asarray(roi[0] * M))
+    ax.set_ylim(np.asarray(roi[1] * M))
     ax.axis(axis_ind)
     return cax
 
 
-def add_roi(ax, roi, M = 1, Dxy_ori = np.asarray([[0,0],[0,0]]), color='red'):
-    roi_x = np.asarray(roi[0]) * M + Dxy_ori[0][0]
-    roi_y = np.asarray(roi[1]) * M + Dxy_ori[1][0]
+def add_roi(ax, roi, M=1, color='red'):
+    """Outline roi (native pixels) on an image shown at M times the native sampling."""
+    roi_x = np.asarray(roi[0]) * M
+    roi_y = np.asarray(roi[1]) * M
     ax.plot([roi_x[0], roi_x[0], roi_x[1], roi_x[1], roi_x[0]],
             [roi_y[0], roi_y[1], roi_y[1], roi_y[0], roi_y[0]],
-            color=color, linestyle='--', linewidth=2)
+            color=color, linestyle='--', linewidth=1.5)
 
 
 def bounded_softplus(raw, c_min=C_MIN, c_max=C_MAX):
+    """Map an unconstrained parameter into (c_min, c_max)."""
     positive = F.softplus(raw)
     normalized = positive / (1.0 + positive)
     return c_min + (c_max - c_min) * normalized
 
 
 def raw_from_bounded_softplus(value, c_min=C_MIN, c_max=C_MAX):
-    """Inverse of bounded_softplus so we can initialise raw_c from a target c."""
+    """Inverse of bounded_softplus: the raw parameter of a target c."""
     v = min(max(float(value), c_min + 1e-6), c_max - 1e-6)
     normalized = (v - c_min) / (c_max - c_min)
     positive = normalized / (1.0 - normalized)
@@ -361,7 +312,8 @@ def raw_from_bounded_softplus(value, c_min=C_MIN, c_max=C_MAX):
     return torch.tensor(float(math.log(math.expm1(positive))))
 
 
-# Derived from clovaai/AdamP (MIT), with complex-valued modifications by Ni Chen; see THIRD_PARTY_NOTICES.md
+# Derived from clovaai/AdamP (MIT), with complex-valued modifications by Ni Chen for inverse
+# diffraction imaging; see THIRD_PARTY_NOTICES.md
 class AdamP(Optimizer):
     '''
         https://clovaai.github.io/AdamP/
@@ -376,14 +328,13 @@ class AdamP(Optimizer):
         return x.view(x.size(0), -1)
 
     def _layer_view(self, x):
-        return x.reshape(1, -1)#x.view(1, -1)
+        return x.reshape(1, -1)
 
     def _cosine_similarity(self, x, y, eps, view_func):
         x = view_func(x)
         y = view_func(y)
 
-        # return F.cosine_similarity(x, y, dim=1, eps=eps).abs_()
-        # Modified by Ni Chen
+        # Modified by Ni Chen: the similarity of the magnitudes, for complex parameters
         return F.cosine_similarity(x.abs(), y.abs(), dim=1, eps=eps).abs_()
 
     def _projection(self, p, grad, perturb, delta, wd_ratio, eps):
@@ -463,12 +414,9 @@ def l2_loss(x):
 
 
 def iwe_neg_var_loss(iwe_refs):
-    """CMax sharpness loss for one or more reference-time IWEs.
+    """Contrast-maximisation loss: minus the variance of an image of warped events.
 
-    A single 2-D tensor reproduces the original ``-torch.var(iwe)`` objective.
-    A list/tuple (or a stacked tensor) averages the same objective over the
-    requested reference times, so changing ``num_t_ref`` does not rescale the
-    loss or change the trajectory segmentation.
+    A list, tuple or stacked tensor of images averages the same objective over them.
     """
     if isinstance(iwe_refs, torch.Tensor):
         refs = [iwe_refs] if iwe_refs.ndim == 2 else list(iwe_refs)
@@ -479,67 +427,46 @@ def iwe_neg_var_loss(iwe_refs):
     return torch.stack([-torch.var(iwe) for iwe in refs]).mean()
 
 
-def l1_loss(x, beta = 0.5):
+def l1_loss(x, beta=0.5):
+    """Mean smooth-L1 magnitude of x; beta is the width of the quadratic zone."""
     smooth_loss = torch.nn.SmoothL1Loss(beta = beta, reduction='mean')
     return smooth_loss(x, torch.zeros_like(x))
 
 
-def tv_loss(x, tv_order=1, tv_tau=1e-4, iso=True, spatial_scale=1.0):
-    '''The smaller tv_tau, the smoother the image.'''
+def tv_loss(x, tv_tau=1e-4, iso=True, spatial_scale=1.0):
+    """First-order total variation of a real or complex image, averaged over its pixels.
+
+    iso sums sqrt(|d_x|^2 + |d_y|^2 + tv_tau); otherwise |d_x| + |d_y|.  spatial_scale multiplies
+    the differences, so that one weight means the same on the native and on a finer grid.
+    """
     arr_size = 1
     for idx in range(len(x.shape)):
         arr_size = arr_size * x.shape[idx]
 
-    if tv_order == 1:
-        x_d = x - torch.roll(x, -1, dims=1)
-        y_d = x - torch.roll(x, -1, dims=0)
+    x_d = x - torch.roll(x, -1, dims=1)
+    y_d = x - torch.roll(x, -1, dims=0)
 
-    elif tv_order == 2:
-        '''need check'''
-        x_d = x - 2 * torch.roll(x, -1, dims=1) + torch.roll(x, 2, dims=1)
-        y_d = x - 2 * torch.roll(x, -1, dims=0) + torch.roll(x, 2, dims=0)
+    x_d = x_d * spatial_scale
+    y_d = y_d * spatial_scale
+    x_d[:, -1:] = torch.tensor(0.0, device=x.device)
+    y_d[-1:, :] = torch.tensor(0.0, device=x.device)
 
-    elif tv_order == 3:
-        '''need check'''
-        x_d = x - 3 * torch.roll(x, -1, dims=1) + 3 * torch.roll(x, 2, dims=1) - torch.roll(x, 3, dims=1)
-        y_d = x - 3 * torch.roll(x, -1, dims=0) + 3 * torch.roll(x, 2, dims=0) - torch.roll(x, 3, dims=0)
-
-    else:
-        print('order should be smaller than 3')
-
-    x_d = x_d * spatial_scale ** tv_order
-    y_d = y_d * spatial_scale ** tv_order
-    x_d[:, -tv_order:] = torch.tensor(0.0, device=x.device)
-    y_d[-tv_order:, :] = torch.tensor(0.0, device=x.device)
-    # x_d[:, :tv_order-1] = torch.zeros(1, device=x.device)
-    # y_d[-tv_order:-1, :] = torch.zeros(1, device=x.device)
-
-    if iso == True:
+    if iso:
         TV_amp = torch.sqrt(x_d.abs() ** 2 + y_d.abs() ** 2 + tv_tau).sum()
-
-    elif iso == False:
-        TV_amp = (x_d.abs() + y_d.abs()).sum()
-
-    elif iso == 'mix':
-        '''https://arxiv.org/abs/2005.04401'''
-        TV_amp = (x_d.abs() + y_d.abs()).sum() - 0.5 * torch.sqrt(x_d.abs() ** 2 + y_d.abs() ** 2 + tv_tau).sum()
-
     else:
-        print('wrong parameter')
+        TV_amp = (x_d.abs() + y_d.abs()).sum()
 
     return TV_amp / arr_size
 
 
 def flow_regularization_weights(Dxy_pc, eps=1e-8, min_flow_mag=0.0):
-    """Direction weights B with B.T B = I - (D.T D)/lambda_max.
+    """Direction weights B with B.T B = I - (D.T D) / lambda_max, from segment displacements D.
 
-    Rank-one motion gives the usual transverse TV projection.  Independent
-    motion in the second direction reduces its weight; equal coverage gives
-    zero directional penalty.  No motion gives ordinary isotropic TV.
-    Segment reversals preserve D.T D, including oblique back-and-forth motion.
-    Detach the geometry so the image prior cannot steer the estimated flow.
-    Use the event branch's min_flow_mag so excluded segments cannot falsely
-    fill its null space and reduce TV.
+    The events constrain the gradient along the transport, so this prior acts across it.
+    Rank-one motion gives the transverse projection.  Independent motion in the second
+    direction reduces its weight, equal coverage gives zero penalty, and no motion gives
+    ordinary isotropic TV.  The geometry is detached so that the image prior cannot steer the
+    transport, and segments below min_flow_mag are excluded as they are from the event term.
     """
     D = Dxy_pc.detach()
     if D.ndim != 2 or D.shape[1] != 2:
@@ -553,59 +480,33 @@ def flow_regularization_weights(Dxy_pc, eps=1e-8, min_flow_mag=0.0):
     return weights[:, None] * axes.T
 
 
-def tv_loss_flow(x, tv_order=1, tv_tau=1e-4, iso=True, Dxy=[1, 1],
-                 spatial_scale=1.0, direction_weights=None):
-    '''The smaller tv_tau, the smoother the image.'''
+def tv_loss_flow(x, direction_weights, tv_tau=1e-4, spatial_scale=1.0):
+    """Isotropic total variation of the gradient projected by direction_weights (2 x 2).
+
+    The differences are expressed in sensor-pixel coordinates through spatial_scale, so one
+    weight means the same at M = 1 and at M > 1.
+    """
     arr_size = 1
     for idx in range(len(x.shape)):
         arr_size = arr_size * x.shape[idx]
 
-    if tv_order == 1:
-        x_d = x - torch.roll(x, -1, dims=1)
-        y_d = x - torch.roll(x, -1, dims=0)
-    elif tv_order == 2:
-        '''need check'''
-        x_d = x - 2 * torch.roll(x, -1, dims=1) + torch.roll(x, 2, dims=1)
-        y_d = x - 2 * torch.roll(x, -1, dims=0) + torch.roll(x, 2, dims=0)
+    x_d = x - torch.roll(x, -1, dims=1)
+    y_d = x - torch.roll(x, -1, dims=0)
 
-    # Express the discrete derivative in sensor-pixel coordinates so the same
-    # kappa_tv has the same meaning for M=1 and M>1.
-    x_d = x_d * spatial_scale ** tv_order
-    y_d = y_d * spatial_scale ** tv_order
+    x_d = x_d * spatial_scale
+    y_d = y_d * spatial_scale
 
-    x_d[:, -tv_order:] = torch.tensor(0.0, device=x.device)
-    y_d[-tv_order:, :] = torch.tensor(0.0, device=x.device)
-    if direction_weights is None:
-        d_ver = -x_d * Dxy[1] + y_d * Dxy[0]
-        d_ver_sq = d_ver ** 2
-    else:
-        # A matrix of directional weights generalizes the single transverse
-        # projection; its Euclidean norm also has a finite gradient at zero.
-        B = direction_weights.detach().to(device=x.device, dtype=x.dtype)
-        if B.ndim == 4:
-            # one 2x2 per pixel, from flow_regularization_weights_dense.  Written
-            # out rather than contracted: einsum is about twice as slow here.
-            projected = torch.stack((B[0, 0] * x_d + B[0, 1] * y_d,
-                                     B[1, 0] * x_d + B[1, 1] * y_d))
-        else:
-            projected = B @ torch.stack((x_d, y_d)).reshape(2, -1)
-        # Carry the squared norm, which is what the isotropic branch needs.
-        # torch.linalg.vector_norm over dim 0 of a 2 x N tensor costs about
-        # 400 times this on CPU for the same arithmetic.
-        d_ver_sq = projected[0] ** 2 + projected[1] ** 2
-        d_ver = None
-    if   iso:
-        TV_amp = torch.sqrt(d_ver_sq + tv_tau).sum()
-    else:
-        TV_amp = (d_ver.abs() if d_ver is not None else d_ver_sq.sqrt()).sum()
+    x_d[:, -1:] = torch.tensor(0.0, device=x.device)
+    y_d[-1:, :] = torch.tensor(0.0, device=x.device)
+    B = direction_weights.detach().to(device=x.device, dtype=x.dtype)
+    projected = B @ torch.stack((x_d, y_d)).reshape(2, -1)
+    d_ver_sq = projected[0] ** 2 + projected[1] ** 2
+    TV_amp = torch.sqrt(d_ver_sq + tv_tau).sum()
     return TV_amp / arr_size
 
 
 def down_sampling(x, sigma):
-    #     if not isinstance(x, torch.Tensor):
-    #         x = torch.tensor(x, dtype=torch.float32)
-
-    # Unfold with a step size equal to the block size to prevent overlap
+    """Pixel-aperture average and decimation: the mean over non-overlapping sigma x sigma blocks."""
     patches = x.unfold(0, sigma, sigma).unfold(1, sigma, sigma)
     y = patches.mean(dim=-1).mean(dim=-1)
 
@@ -613,62 +514,27 @@ def down_sampling(x, sigma):
 
 
 def reset_optimizer_and_params(optimizer, param_groups):
-    """
-    彻底清除 optimizer 的内部状态和参数梯度，并删除参数引用。
-    支持 param_groups 结构形如 [{'params': param, 'lr': ...}, ...]
-    """
-    # 1️⃣ 遍历所有参数组
+    """Close a stage: drop the gradients of its parameters and the optimizer state, free caches."""
     all_params = []
     for group in param_groups:
         params = group.get('params', None)
         if params is None:
             continue
-        # 如果 params 是单个 tensor 而不是列表
         if isinstance(params, torch.nn.Parameter):
             params = [params]
         all_params.extend(params)
 
-    # 2️⃣ 清理梯度
     for p in all_params:
         if hasattr(p, "grad") and p.grad is not None:
             p.grad = None
 
-    # 3️⃣ 清空优化器状态
     optimizer.state.clear()
-
-    # 4️⃣ 删除参数对象（从当前命名空间）
-    # 注意：无法直接在函数内部删除外部变量名，
-    #       这里只能返回需要删除的对象列表。
-    del all_params[:]
-
-    # 5️⃣ 回收资源
     torch.cuda.empty_cache()
     gc.collect()
 
-    print("Optimizer state, gradients, and parameter references have been reset.")
 
-
-def as_flow_tensor(
-    flow: ArrayLike,
-    image_shape: tuple[int, int],
-    device: Optional[Union[str, torch.device]] = None,
-) -> torch.Tensor:
-    if not torch.is_tensor(flow):
-        flow = torch.from_numpy(np.asarray(flow))
-    if device is not None:
-        flow = flow.to(device=torch.device(device))
-    flow = flow.float()
-    if flow.ndim == 4 and flow.shape[0] == 1:
-        flow = flow[0]
-    if flow.ndim != 3 or flow.shape[0] != 2:
-        raise ValueError("flow tensor must have shape [2,H,W] or [1,2,H,W]")
-    if tuple(flow.shape[-2:]) != tuple(image_shape):
-        flow = F.interpolate(flow[None], size=image_shape, mode="bilinear", align_corners=True)[0]
-    return flow
-
-
-def dense_flow_grid(flow_xy: torch.Tensor, image_shape: tuple[int, int]) -> torch.Tensor:
-    flow_xy = as_flow_tensor(flow_xy, image_shape)
+def dense_flow_grid(flow_xy):
+    """grid_sample coordinates of x + flow for a per-pixel step flow_xy [2, H, W] in pixels."""
     _, h, w = flow_xy.shape
     yy, xx = torch.meshgrid(
         torch.arange(h, device=flow_xy.device, dtype=flow_xy.dtype),
@@ -682,11 +548,11 @@ def dense_flow_grid(flow_xy: torch.Tensor, image_shape: tuple[int, int]) -> torc
     return torch.stack((grid_x, grid_y), dim=-1).unsqueeze(0)
 
 
-def unit_flow_mag_mask(
-    flow_xy: torch.Tensor,
-    eps: float = 1e-1,
-    border: int = 1,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def unit_flow_mag_mask(flow_xy, eps=1e-1, border=1):
+    """Unit direction, magnitude and mask of a step field [2, H, W].
+
+    The mask keeps finite magnitudes above eps away from the image border; the direction is
+    zero outside it."""
     if flow_xy.ndim != 3 or flow_xy.shape[0] != 2:
         raise ValueError("flow_xy must have shape [2,H,W]")
     mag = torch.linalg.vector_norm(flow_xy, dim=0)
@@ -695,7 +561,6 @@ def unit_flow_mag_mask(
     if border > 0:
         border_mask = torch.zeros_like(mask)
         border_mask[border:-border, border:-border] = True
-        #mask = border_mask
         mask = mask & border_mask
     mask = mask.float()
     unit_flow = flow_xy / safe_mag.unsqueeze(0)
@@ -703,154 +568,53 @@ def unit_flow_mag_mask(
     return unit_flow.float(), safe_mag.float(), mask
 
 
-def warp_iwe_from_log_image(
-    log_image: torch.Tensor,
-    flow_map: torch.Tensor,
-    padding_mode: str = "zeros",
-    stencil: str = "forward",
-) -> torch.Tensor:
-    """L(x) - L(x + u) ("forward", stencil centre at x + u/2) or
-    L(x - u/2) - L(x + u/2) ("centered", stencil centre at x).
-
-    Both equal -grad L . u for affine L; on curved L the forward stencil is the
-    centred one shifted by u/2, so its IWE is registered half a step downstream
-    of the latent it is compared with."""
-    if stencil not in ("forward", "centered"):
-        raise ValueError(f"stencil must be 'forward' or 'centered', got {stencil!r}")
-
-    def _sample(flow):
-        grid = dense_flow_grid(flow, tuple(log_image.shape)).to(device=log_image.device, dtype=log_image.dtype)
-        return F.grid_sample(
-            log_image[None, None],
-            grid,
-            mode="bilinear",
-            padding_mode=padding_mode,
-            align_corners=True,
-        )[0, 0]
-
-    if stencil == "forward":
-        return log_image - _sample(flow_map)
-    return _sample(-0.5 * flow_map) - _sample(0.5 * flow_map)
+def warp_iwe_from_log_image(log_image, flow_map):
+    """L(x) - L(x + u) for a per-pixel step u = flow_map [2, H, W], sampled bilinearly with zeros
+    outside the image.  It equals -grad L . u for affine L, and is centred half a step
+    downstream of x."""
+    grid = dense_flow_grid(flow_map).to(device=log_image.device, dtype=log_image.dtype)
+    shifted = F.grid_sample(log_image[None, None], grid, mode="bilinear", padding_mode="zeros",
+                            align_corners=True)[0, 0]
+    return log_image - shifted
 
 
-def segment_iwe_from_log_image(
-    log_image: torch.Tensor,
-    segment_displacements: torch.Tensor,
-    min_flow_mag: float = 0.25,
-    stencil: str = "forward",
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Unit-step frame differences on the existing segment-EKLT amplitude scale.
+def segment_iwe_from_log_image(log_image, segment_displacements, min_flow_mag):
+    """Finite-step prediction of the per-segment event image from the log latent.
 
-    Each D_i is in sensor pixels; u_i = D_i / |D_i| is a one-pixel stencil
-    on the CURRENT image grid (one HR pixel during SR).  The prediction is
-    |D_i| * [L(x) - L(x + u_i)] (stencil="forward") or
-    |D_i| * [L(x - u_i/2) - L(x + u_i/2)] (stencil="centered"); both agree
-    with -grad_grid(L).D_i for affine L, and the centred one is registered on
-    x rather than x + u_i/2.  This is a finite-difference IWE model, not an
-    exact inter-event constraint.
-
-    Both |D_i| and u_i stay differentiable.  The mask uses the ORIGINAL
-    sensor displacement, before normalization, and excludes the image border
-    so both samples remain in bounds.  Apply it to the rendered target too.
-    Uniform [K,2] or spatial [K,2,H,W] displacements are accepted.
+    Each D_i of segment_displacements [K, 2] is in sensor pixels, and u_i = D_i / |D_i| is a
+    one-pixel step on the grid of log_image (one fine pixel at M > 1).  The prediction is
+    |D_i| [L(x) - L(x + u_i)], which equals -grad L . D_i for affine L.  Both |D_i| and u_i
+    stay differentiable.  The mask drops segments with |D_i| <= min_flow_mag and the image
+    border, so that both samples are inside the image; apply it to the measured image too.
     """
-    if log_image.ndim != 2 or segment_displacements.ndim not in (2, 4):
-        raise ValueError("Expected L [H,W] and displacements [K,2] or [K,2,H,W]")
-    if segment_displacements.shape[0] == 0 or segment_displacements.shape[1] != 2:
-        raise ValueError("At least one segment with x/y displacement is required")
+    if log_image.ndim != 2 or segment_displacements.ndim != 2 or segment_displacements.shape[1] != 2:
+        raise ValueError("Expected L [H, W] and displacements [K, 2]")
+    if segment_displacements.shape[0] == 0:
+        raise ValueError("At least one segment is required")
     predictions, masks = [], []
     for displacement in segment_displacements:
         flow = displacement.to(device=log_image.device, dtype=log_image.dtype)
-        if flow.ndim == 1:
-            flow = flow[:, None, None].expand(2, *log_image.shape)
-        if flow.shape[1:] != log_image.shape:
-            raise ValueError("Dense segment flow must match the image grid")
+        flow = flow[:, None, None].expand(2, *log_image.shape)
         unit_flow, magnitude, mask = unit_flow_mag_mask(flow, eps=min_flow_mag, border=1)
-        predictions.append(warp_iwe_from_log_image(log_image, unit_flow, stencil=stencil) * magnitude * mask)
+        predictions.append(warp_iwe_from_log_image(log_image, unit_flow) * magnitude * mask)
         masks.append(mask)
     return torch.stack(predictions), torch.stack(masks)
 
 
-def track_position(img_seq=[], is_mask=1):
-    if is_mask:
-        img_seq = img_seq / torch.mean(img_seq, dim=0, keepdim=True)
+def track_position(img_seq):
+    """Shift (row, column) of each image against the first, by phase correlation at 1/100 px.
 
+    A ten-pixel border is ignored.  Returns a [2, N] numpy array whose first column is zero.
+    """
     img_ref = img_seq[0]
     img_num = img_seq.size(0)
     pos = np.zeros((2, img_num))
-    edge_ignore1 = 10
-    standardImg = img_ref[edge_ignore1:-edge_ignore1, edge_ignore1:-edge_ignore1]
+    border = 10
+    reference = img_ref[border:-border, border:-border].cpu().numpy()
 
-    print('calculating position...')
     for idx in range(1, img_num):
-        copyImg = img_seq[idx, edge_ignore1:-edge_ignore1, edge_ignore1:-edge_ignore1]
-        pos[:, idx], error, diffphase = phase_cross_correlation(standardImg.cpu().numpy(), copyImg.cpu().numpy(),
-                                                                upsample_factor=100, space='real', normalization=None)
-    
-    return pos
-
-
-def refine_position(img_seq=[], pos=[], is_mask=1):
-    device = img_seq.device
-    if is_mask:
-        img_seq = img_seq / torch.mean(img_seq, dim=0, keepdim=True)
-
-    img_size = img_seq.size(-1)
-    img_num = img_seq.size(0)
-
-#     fx_shift, fy_shift = shift_frequency(img_size=img_size, device=device)
-#     img_refine = torch.zeros(img_size, img_size, dtype=torch.float64, device=device)
-# #     padded_image = F.pad(image, (left_pad, right_pad, top_pad, bottom_pad))
-#     for idx in range(img_num):
-#         Hs = torch.exp(-1j * 2 * np.pi * (fx_shift * pos[0, idx] / img_size + fy_shift * pos[1, idx] / img_size)).to(
-#             device)
-#         img_refine += (ifft2(fft2(img_seq[:, :, idx]) * Hs)).real.abs()
-#     img_refine = img_refine / img_num
-
-    img_refine = img_seq[0, :, :]
-
-    # Refine the subpixel shifts
-    pos = np.zeros((2, img_num))
-    edge_ignore1 = 10
-    # print('Refine position...')
-    img_reference = img_refine[edge_ignore1:-edge_ignore1, edge_ignore1:-edge_ignore1]
-    for idx in range(1, img_num):
-        copyImg = img_seq[idx, edge_ignore1:-edge_ignore1, edge_ignore1:-edge_ignore1]
-        pos[:, idx], error, diffphase = phase_cross_correlation(img_reference.cpu().numpy(), copyImg.cpu().numpy(),
-                                                                upsample_factor=100, space='real', normalization=None)
-
+        image = img_seq[idx, border:-border, border:-border].cpu().numpy()
+        pos[:, idx] = phase_cross_correlation(reference, image, upsample_factor=100, space='real',
+                                              normalization=None)[0]
 
     return pos
-
-
-class Simple_sr:
-    def __init__(self, holo_raw=None,
-                 img_num=9, img_size= np.asarray([260, 346]) , mag=3, pp_sensor=1.1e-6,device = "cpu"
-                 ):
-        self.holo_raw = holo_raw
-        self.device = device
-        self.img_num = img_num
-        self.img_size = img_size
-        self.mag = mag
-        self.img_size_up = img_size * mag
-        self.pp_sensor = pp_sensor
-        self.pp_up = pp_sensor / mag
-
-
-    def pos_registration(self, is_mask=0):
-        holo_raw_hr = torch.zeros(self.img_num, self.img_size_up[0], self.img_size_up[1], dtype=torch.float64,
-                                  device=self.device)
-        for idx_img in range(self.img_num):
-            tmp = self.holo_raw[idx_img, :, :]
-            #             holo_raw_hr[:,:,idx_img] = F.interpolate(tmp[(None,) * 2], size=(self.img_size_up, self.img_size_up),
-            #                                     mode='bicubic').squeeze()
-            holo_raw_hr[idx_img, :, :] = F.interpolate(tmp[(None,) * 2], size=(self.img_size_up[0], self.img_size_up[1]),
-                                                       mode='bilinear', align_corners=True).squeeze()
-
-        pos_track = track_position(img_seq=holo_raw_hr, is_mask=is_mask)
-        pos_refine = pos_track
-
-        for iLoc in range(3):
-            pos_refine = refine_position(img_seq=holo_raw_hr, pos=pos_refine, is_mask=is_mask)
-
-        self.pos = pos_refine

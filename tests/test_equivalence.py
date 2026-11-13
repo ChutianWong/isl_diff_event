@@ -1,38 +1,52 @@
-"""Compare five-update CPU outputs with small reference arrays.
+"""Short CPU reconstructions of the bundled windows against stored references.
 
-The fixture records seed, threads and sample indices.
+tests/reference_runs.py states what is compared and to which tolerance.
 """
 import json
-from pathlib import Path
+
 import numpy as np
 import pytest
 
-REFERENCE = Path(__file__).resolve().parent / "reference"
-NAMES = ("object_m1", "object_sr", "latent_m1", "latent_sr", "trajectory", "c", "z", "z_m1", "z_autofocus", "background")
+from reference_runs import REFERENCE, assert_matches, digest, sample
+
+PROVENANCE = json.loads((REFERENCE / "provenance.json").read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("name", NAMES)
-def test_original_cpu_reference(cpu_result, name):
-    arrays = cpu_result.arrays()
-    actual = arrays[name]
-    if actual.ndim == 2 and name != "trajectory":
-        iy = np.linspace(0, actual.shape[0] - 1, 16).astype(int)
-        ix = np.linspace(0, actual.shape[1] - 1, 16).astype(int)
-        actual = actual[np.ix_(iy, ix)]
-    with np.load(REFERENCE / "cpu_5iter.npz", allow_pickle=False) as stored:
-        expected = stored[name]
-        assert actual.dtype == expected.dtype
-        assert actual.shape == expected.shape
-        np.testing.assert_allclose(actual, expected, atol=5e-7, rtol=5e-7)
+def check(name, arrays, bitwise):
+    with np.load(REFERENCE / f"{name}.npz", allow_pickle=False) as stored:
+        assert set(stored.files) == set(arrays)
+        for key in stored.files:
+            assert_matches(sample(arrays[key]), stored[key], bitwise)
+    if bitwise:
+        assert {key: digest(value) for key, value in arrays.items()} == PROVENANCE["full_array_hashes"][name]
+
+
+def test_holography_reference(cpu_result, bitwise):
+    check("cpu_5iter", cpu_result.arrays(), bitwise)
     assert cpu_result.object_sr.device.type == "cpu"
 
 
-def test_reference_provenance(cpu_result):
-    provenance = json.loads((REFERENCE / "provenance.json").read_text(encoding="utf-8"))
-    assert provenance["iterations"] == cpu_result.config["solver"]["iterations"]
-    assert provenance["seed"] == cpu_result.config["solver"]["seed"] == 0
-    assert provenance["device"] == "cpu"
-    assert provenance["source"].startswith("reference implementation")
+def test_holography_reference_with_learning_rate_steps(cpu_result, stepped_result, bitwise):
+    check("cpu_5iter_stepped", stepped_result.arrays(), bitwise)
+    plain, stepped = cpu_result.arrays(), stepped_result.arrays()
+    for key in ("trajectory", "object_m1", "object_sr"):
+        assert np.abs(plain[key] - stepped[key]).max() > 1e-4
+
+
+def test_joint_reference(joint_result, bitwise):
+    scene, arrays = joint_result
+    check(f"joint_tiny_{scene}", arrays, bitwise)
+    scale = 3 if scene == "earthworm" else 2
+    assert arrays["joint"].shape == (260 * scale, 346 * scale)
+    assert arrays["iwe_measured"].shape == arrays["iwe_predicted"].shape == (12, 260 * scale, 346 * scale)
+    assert ("object_sr" in arrays) == (scene == "testis")
+
+
+def test_joint_reference_with_learning_rate_steps(joint_result, stepped_joint_result, bitwise):
+    check("joint_tiny_stepped_earthworm", stepped_joint_result, bitwise)
+    scene, plain = joint_result
+    if scene == "earthworm":
+        assert np.abs(plain["joint"] - stepped_joint_result["joint"]).max() > 1e-4
 
 
 def test_save_contract_and_data_protection(cpu_result, tmp_path):

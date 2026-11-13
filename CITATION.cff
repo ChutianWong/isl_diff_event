@@ -1,0 +1,68 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the manuscript below."
+title: "NeuroSR: a minimal implementation of transport-induced differential sensing"
+type: software
+repository-code: "https://github.com/ChutianWong/isl_diff_event"
+authors:
+  - family-names: Wang
+    given-names: Chutian
+  - family-names: Zhu
+    given-names: Shuo
+  - family-names: Chen
+    given-names: Ni
+  - family-names: Wu
+    given-names: Jingqian
+  - family-names: Li
+    given-names: Shuo
+  - family-names: Li
+    given-names: Yuxing
+  - family-names: Zhu
+    given-names: Yanmin
+  - family-names: Chen
+    given-names: Rongzhou
+  - family-names: Zhang
+    given-names: Yunping
+  - family-names: Lam
+    given-names: "Edmund Y."
+preferred-citation:
+  type: unpublished
+  title: "Neuromorphic High-Throughput Imaging via Transport-Induced Differential Sensing"
+  year: 2026
+  notes: "Manuscript under review"
+  authors:
+    - family-names: Wang
+      given-names: Chutian
+    - family-names: Zhu
+      given-names: Shuo
+    - family-names: Chen
+      given-names: Ni
+    - family-names: Wu
+      given-names: Jingqian
+    - family-names: Li
+      given-names: Shuo
+    - family-names: Li
+      given-names: Yuxing
+    - family-names: Zhu
+      given-names: Yanmin
+    - family-names: Chen
+      given-names: Rongzhou
+    - family-names: Zhang
+      given-names: Yunping
+    - family-names: Lam
+      given-names: "Edmund Y."
+references:
+  - type: dataset
+    title: "Neuromorphic High-Throughput Imaging via Transport-Induced Differential Sensing"
+    doi: 10.6084/m9.figshare.33545614
+    year: 2026
+    authors:
+      - family-names: Wang
+        given-names: Chutian
+      - family-names: Li
+        given-names: Yuxing
+      - family-names: Zhao
+        given-names: Yaping
+      - family-names: Zhu
+        given-names: Shuo
+      - family-names: Lam
+        given-names: Edmund

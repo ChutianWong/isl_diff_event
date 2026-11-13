@@ -1,10 +1,22 @@
-"""Load a pre-extracted window without changing its dtype, order or intensity scale."""
+"""Load the window of an acquisition directory without changing its dtype, order or intensity scale."""
 from pathlib import Path
 from types import SimpleNamespace
 import hashlib
 import numpy as np
 
 KEYS = ("xs", "ys", "ts", "ps", "frame", "frame_ind", "win_frame", "win", "start", "end")
+
+
+def output_directory(out, *inputs):
+    """Resolve an output directory and refuse one inside data/ or inside an input directory.
+
+    data/ is that of the working directory and, in a source checkout, the one beside src/."""
+    out = Path(out).expanduser().resolve()
+    for root in (Path.cwd() / "data", Path(__file__).resolve().parents[2] / "data", *inputs):
+        root = Path(root).resolve()
+        if out == root or root in out.parents:
+            raise ValueError(f"The output directory must be outside data/ and the input directory: {out}")
+    return out
 
 
 def load_window_npz(config):
@@ -21,7 +33,7 @@ def load_window_npz(config):
         values = {key: stored[key] for key in KEYS}
     for key, dtype in (("xs", "int16"), ("ys", "int16"), ("ts", "int64"), ("ps", "int8"), ("frame", "uint8")):
         if values[key].dtype != np.dtype(dtype):
-            raise ValueError(f"{key} must preserve original dtype {dtype}")
+            raise ValueError(f"{key} must have dtype {dtype}")
     for key in KEYS[5:]:
         if values[key].shape != ():
             raise ValueError(f"{key} must be scalar")
@@ -37,12 +49,15 @@ def load_window_npz(config):
     if values["ts"][0] != 0 or np.any(np.diff(values["ts"]) < 0) or values["ts"][-1] > values["win"]:
         raise ValueError("Event timestamps must be ordered, window-relative microseconds")
     if not np.all(np.isin(values["ps"], [0, 1])):
-        raise ValueError("Stored polarity must use the original 0/1 convention")
+        raise ValueError("Stored polarity must be 0 or 1")
     acquisition = facts["acquisition"]
     expected = {"frame_ind": acquisition["frame_index"], "win_frame": acquisition["exposure_us"],
                 "win": acquisition["window_us"], "start": acquisition["window_start_us"], "end": acquisition["exposure_end_us"]}
-    if any(values[k] != v for k, v in expected.items()) or n != acquisition["event_count"]:
-        raise ValueError("Window metadata differs from acquisition facts")
+    differing = [f"{k} = {values[k]} against {v}" for k, v in expected.items() if values[k] != v]
+    if n != acquisition["event_count"]:
+        differing.append(f"{n} events against {acquisition['event_count']}")
+    if differing:
+        raise ValueError("The window differs from the acquisition facts of config.yaml: " + ", ".join(differing))
     if values["end"] - values["start"] != values["win_frame"]:
         raise ValueError("Exposure duration differs from its endpoints")
     return SimpleNamespace(**values, source_path=path)

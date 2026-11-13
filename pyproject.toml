@@ -1,16 +1,33 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "neurosr"
 version = "0.1.0.dev0"
-description = "Event and frame reconstruction for transport-induced differential sensing"
+description = "Joint event and frame reconstruction for transport-induced differential sensing"
+readme = "README.md"
+license-files = ["NOTICE.md", "THIRD_PARTY_NOTICES.md"]
 requires-python = ">=3.10"
 dependencies = ["numpy", "torch", "matplotlib", "PyYAML", "scikit-image", "scipy"]
+keywords = ["event camera", "computational imaging", "super-resolution", "holography", "microscopy"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Scientific/Engineering :: Physics",
+]
 
 [project.optional-dependencies]
 test = ["pytest"]
+convert = ["dv", "opencv-python"]
+
+[project.urls]
+Repository = "https://github.com/ChutianWong/isl_diff_event"
+Dataset = "https://doi.org/10.6084/m9.figshare.33545614"
+
+[project.scripts]
+neurosr = "neurosr.__main__:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

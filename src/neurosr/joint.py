@@ -1,13 +1,24 @@
-"""Fixed-transport joint event reconstruction from a native EDI anchor.
+"""Joint event reconstruction at fixed transport and contrast, from an EDI anchor.
 
-The sensor latent is intensity (identity optics) or the intensity of a
-propagated complex field. Both event terms use the same native pixel aperture.
+Two event terms act on the same latent and share one pixel aperture, a native-pixel box average
+of the sensor intensity taken before the log response:
+
+    IWE term    the finite-step prediction along each segment against c times the segmented
+                image of warped events;
+    pair term   the event-wise (EW) vote: for each event, the log-intensity increment since
+                the previous event at its pixel, sampled at the two warped positions, against
+                +-c; the residuals are splatted with the transport-shaped kernel and normalized
+                by the splatted count.
+
+The frame term compares the pixel-aperture average of the latent with the anchor.  The latent is
+an intensity, or the intensity |P_z{O}|^2 of a propagated complex field.
 """
 import math
 
 import torch
 import torch.nn.functional as F
 
+from ._constants import MIN_FLOW_MAG, PIXEL_PITCH_M, SIGMA, SIGMA_SR, WAVELENGTH_M
 from .optics import AngularSpectrum, laplacian
 from .ops import (
     AdamP, down_sampling, l1_loss, tv_loss,
@@ -18,16 +29,22 @@ from .ops import (
 )
 from .events import previous_event_indices, sample_image_at_events
 
-MIN_FLOW = 0.005
 EPS = 1e-6
-LOG_TV_WEIGHT = 0.02
+MIXING = (.5, .5)             # IWE term, pair term, after their values are matched at the first step
+IWE_WEIGHT = 0.2              # IWE term against the frame term, for an intensity latent
+SHORT_SEGMENT_PX = 0.1        # a shorter segment has no usable direction: its kernel is isotropic
+LOG_TV_WEIGHT = 0.02          # isotropic TV of log(I + LOG_TV_OFFSET) on the fine intensity
 LOG_TV_OFFSET = 0.02
-WAVELENGTH_M = 632.8e-9
-PIXEL_PITCH_M = 18.5e-6
+# Step size, StepLR (step_size, gamma) and prior weights of the three fits.
+NATIVE = dict(lr=4e-3, lr_background=4e-3, schedule=(200, 0.7), background=0.4, background_beta=1e-5)
+FINE = dict(lr=1e-3, schedule=(100, 0.7))
+FIELD = dict(lr=1e-2, lr_distance=2e-6, schedule=(500, 1.0), tv_object=4e-2, laplacian=1e-3)
 
 
 def native_box(image, m):
-    """Output centre is at index + (m-1)/2 - left, including even m."""
+    """Rolling m x m mean: the native pixel aperture on the fine grid.
+
+    The output centre is at index + (m - 1) / 2 - left, including even m."""
     if m == 1:
         return image
     left = (m - 1) // 2
@@ -37,7 +54,8 @@ def native_box(image, m):
 
 
 class _EventTerms:
-    """Fixed transport and contrast. Cache the fixed sampling and splat geometry."""
+    """The two event terms at fixed transport and contrast, with their sampling and splat
+    geometry computed once."""
     def __init__(self, x, y, t, polarity, flow, tref, c, m, sigma):
         self.m, self.c = m, c
         h, w = flow.sensor
@@ -49,9 +67,11 @@ class _EventTerms:
         xw, yw = flow.warp(x, y, t, tref)
         self.x, self.y = m * xw + left, m * yw + left
         seg = torch.bucketize(t.contiguous(), flow.segment_boundaries[1:-1].to(t), right=True)
-        d = flow.segments(1)
+        d = flow.segments()
         self.length = d.norm(dim=1)
         u = d / self.length.clamp_min(1e-6)[:, None]
+        # IWE term: c times the segmented IWE, each event moved half a step against the transport
+        # so that it sits at the centre of the finite forward step.
         self.target = c * render_segments(
             (self.x - .5 * u[seg, 0]) / m, (self.y - .5 * u[seg, 1]) / m,
             t, polarity, flow.sensor, flow.segment_boundaries, M=m, Dxy_pc=d,
@@ -59,22 +79,24 @@ class _EventTerms:
 
         native_count = events_to_image_torch(xw, yw, torch.ones_like(x), flow.sensor,
                                              device=dev, polar=False)
-        # The original count support and one-pixel finite-difference border.
+        # Support: native pixels with more than two warped events, without the one-pixel border
+        # of the finite difference, in segments that move.
         count = (native_count > 2).repeat_interleave(m, 0).repeat_interleave(m, 1)
         count[0, :] = count[-1, :] = False
         count[:, 0] = count[:, -1] = False
-        self.mask = count[None] & (self.length[:, None, None] > MIN_FLOW)
+        self.mask = count[None] & (self.length[:, None, None] > MIN_FLOW_MAG)
 
         rows, cols = torch.meshgrid(torch.arange(self.h, device=dev),
                                     torch.arange(self.w, device=dev), indexing="ij")
         self.iwe_grid = torch.stack((
             (cols[None] + u[:, 0, None, None]) * (2.0 / (self.w - 1)) - 1,
             (rows[None] + u[:, 1, None, None]) * (2.0 / (self.h - 1)) - 1), dim=-1)
+        # The prediction is blurred by the kernel that rendered the measured IWE.
         size = int(2 * sigma * m + 1) | 1
         self.pad = size // 2
         middle = torch.full((1,), self.pad, device=dev, dtype=torch.long)
         zero = torch.zeros(1, device=dev)
-        along = torch.where(self.length < .1, m * sigma / 2, sigma / 2)
+        along = torch.where(self.length < SHORT_SEGMENT_PX, m * sigma / 2, sigma / 2)
         self.kernel = torch.stack([
             gaussian_interpolate_to_image_rot_flow(
                 middle, middle, zero, zero, torch.ones_like(zero), zero.new_zeros(size, size),
@@ -82,6 +104,8 @@ class _EventTerms:
             for k in range(self.k)])[:, None]
         torch.testing.assert_close(self.kernel.sum(dim=(1, 2, 3)), torch.ones(self.k, device=dev))
 
+        # Pair term: each event with the previous event at its pixel, both inside the image
+        # after warping; the residual is splatted at the later event with the same kernel.
         prev = previous_event_indices(x, y, flow.sensor)
         inside = (self.x >= 0) & (self.x <= self.w - 1) & (self.y >= 0) & (self.y <= self.h - 1)
         eligible = (prev >= 0) & inside & inside[prev.clamp_min(0)]
@@ -96,7 +120,7 @@ class _EventTerms:
         x0, y0 = xe.round(), ye.round()
         ix, iy = x0.long()[:, None] + dx.flatten(), y0.long()[:, None] + dy.flatten()
         ax, ay = ix - xe[:, None], iy - ye[:, None]
-        direction = torch.where((self.length[se] < .1)[:, None],
+        direction = torch.where((self.length[se] < SHORT_SEGMENT_PX)[:, None],
                                 u.new_tensor([1., 0.]), u[se])
         ux, uy = direction[:, :1], direction[:, 1:]
         g = torch.exp(-.5 * ((ax * ux + ay * uy) / along[se, None]).square()
@@ -116,6 +140,7 @@ class _EventTerms:
         return image
 
     def losses(self, intensity):
+        """Pair term, IWE term, the pair residuals and the predicted segmented IWE."""
         L = lin_log(native_box(intensity.float(), self.m) * 255).float()
         samples = sample_image_at_events(L, self.x, self.y)
         pairs = samples[self.end] - samples[self.prev] - self.c * self.sign
@@ -130,8 +155,7 @@ class _EventTerms:
 
 
 def _upsample(seed, m):
-    if m == 1:
-        return seed.detach().clone()
+    """Bilinear start of the fit at M; amplitude and phase of a complex field separately."""
     if not seed.is_complex():
         return F.interpolate(seed[None, None], scale_factor=m, mode="bilinear", align_corners=False)[0, 0]
     amplitude, phase = (F.interpolate(x[None, None], scale_factor=m, mode="bilinear", align_corners=True)[0, 0]
@@ -145,20 +169,30 @@ def _optical_model(sensor, m, distance, device):
 
 
 def _fit(events, edi, seed, background, distance, iterations):
+    """Minimise frame + IWE + pair + prior from seed, for one of three cases.
+
+    field    a complex seed: object field and propagation distance, amplitude-domain frame term,
+             complex-field TV and hologram Laplacian priors;
+    native   an intensity at M = 1: intensity and a sparse sensor-fixed background;
+    fine     an intensity at M > 1: intensity only, with the log-TV prior and the background held.
+
+    The two event weights are set at the first step, where the pair term is scaled to the value
+    of the weighted IWE term, and are then held.
+    """
     m = events.m
     holo = seed.is_complex()
     native = m == 1 and not holo
+    case = FIELD if holo else (NATIVE if native else FINE)
     state = torch.nn.Parameter(seed.clone())
     bg = torch.nn.Parameter(background.clone(), requires_grad=native)
     propagation = _optical_model(edi.shape, m, distance, edi.device) if holo else None
-    groups = [{"params": state, "lr": .01 if holo else (.004 if native else .001)}]
+    groups = [{"params": state, "lr": case["lr"]}]
     if holo:
-        groups.append({"params": propagation.distance, "lr": 2e-6})
+        groups.append({"params": propagation.distance, "lr": FIELD["lr_distance"]})
     if native:
-        groups.append({"params": bg, "lr": .004})
+        groups.append({"params": bg, "lr": NATIVE["lr_background"]})
     optimizer = (AdamP if holo else torch.optim.Adam)(groups)
-    schedule = torch.optim.lr_scheduler.StepLR(optimizer, 500 if holo else (200 if native else 100),
-                                                1.0 if holo else .7)
+    schedule = torch.optim.lr_scheduler.StepLR(optimizer, *case["schedule"])
     history = []
     for i in range(iterations + 1):
         final = i == iterations
@@ -166,8 +200,10 @@ def _fit(events, edi, seed, background, distance, iterations):
             image = propagation(state).abs().square() if holo else state
             vote, iwe, pairs, pred = events.losses(image)
             if i == 0:
-                iwe_weight = .2
+                iwe_weight = IWE_WEIGHT
                 if holo:
+                    # the weight of the normalized IWE fidelity, 1e3 per fine pixel, carried
+                    # over to the contrast-scaled term at the seed
                     a, b = pred.detach() * events.mask, events.target * events.mask
                     shape_loss = (a / a.norm().clamp_min(1e-8) - b / b.norm().clamp_min(1e-8)).square().sum()
                     iwe_weight = float(1e3 / (events.h * events.w) * shape_loss / iwe.detach().clamp_min(1e-12))
@@ -178,19 +214,21 @@ def _fit(events, edi, seed, background, distance, iterations):
             pooled = down_sampling(image, m) + bg
             if holo:
                 frame = ((pooled + 1e-8).sqrt() - (edi + 1e-8).sqrt()).square().mean()
-                prior = .04 * tv_loss(state, tv_order=1, tv_tau=1e-4, iso=False)
-                prior = prior + .001 * laplacian(image).abs().mean()
+                prior = FIELD["tv_object"] * tv_loss(state, tv_tau=1e-4, iso=False)
+                prior = prior + FIELD["laplacian"] * laplacian(image).abs().mean()
             elif native:
                 frame = (pooled - edi).square().mean()
-                prior = .4 * l1_loss(bg, beta=1e-5)
+                prior = NATIVE["background"] * l1_loss(bg, beta=NATIVE["background_beta"])
             else:
                 frame = (pooled - edi).square().mean()
-                prior = LOG_TV_WEIGHT * tv_loss((image + LOG_TV_OFFSET).log(), tv_order=1,
-                                                tv_tau=1e-4, iso=True, spatial_scale=m)
+                prior = LOG_TV_WEIGHT * tv_loss((image + LOG_TV_OFFSET).log(), tv_tau=1e-4, iso=True,
+                                                spatial_scale=m)
+            # Floating-point addition is not associative: each case keeps its own order of
+            # summation, on which the stored references depend.
             if holo or native:
-                loss = .5 * iwe_weight * iwe + .5 * vote_weight * vote + frame + prior
+                loss = MIXING[0] * iwe_weight * iwe + MIXING[1] * vote_weight * vote + frame + prior
             else:
-                loss = frame + .5 * iwe_weight * iwe + .5 * vote_weight * vote + prior
+                loss = frame + MIXING[0] * iwe_weight * iwe + MIXING[1] * vote_weight * vote + prior
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Nonfinite joint loss at M={m}, step {i}")
         if i % 100 == 0 or final:
@@ -221,11 +259,13 @@ def reconstruct_joint(edi, events, flow, *, contrast, reference_us, scale, objec
     exposure midpoint in that clock. A complex native object_seed and a positive
     distance_m select holography. In intensity mode, native_steps=0 uses EDI as
     the SR seed and leaves the native additive background at zero.
+
+    Returns the result arrays and a report of the fits.
     """
     holo = object_seed is not None
-    if (not flow.uniform or flow.basis != "linear" or tuple(edi.shape) != flow.sensor
+    if (flow.basis != "linear" or tuple(edi.shape) != flow.sensor
             or edi.dtype != torch.float32 or edi.device != flow.device):
-        raise ValueError("Expected a float32 native EDI anchor and matching uniform linear flow")
+        raise ValueError("Expected a float32 native EDI anchor and matching linear transport")
     if (scale < 2 or int(scale) != scale or not 0 < contrast or not math.isfinite(contrast)
             or not 0 <= reference_us <= flow.t_win):
         raise ValueError("Expected integer scale >= 2, positive finite contrast and a reference inside the window")
@@ -245,15 +285,15 @@ def reconstruct_joint(edi, events, flow, *, contrast, reference_us, scale, objec
     edi = edi.detach()
     seed = object_seed.detach() if holo else edi
     bg = torch.zeros_like(edi)
-    report = dict(mixing=[.5, .5], log_tv_weight=None if holo else LOG_TV_WEIGHT, fits={})
+    report = dict(mixing=list(MIXING), log_tv_weight=None if holo else LOG_TV_WEIGHT, fits={})
     if not holo and native_steps:
         with torch.no_grad():
-            native = _EventTerms(*events, flow, reference_us, contrast, 1, .849)
+            native = _EventTerms(*events, flow, reference_us, contrast, 1, SIGMA)
         seed, _, bg, _, report["fits"]["native"] = _fit(native, edi, seed, bg, None, native_steps)
         del native
 
     with torch.no_grad():
-        plan = _EventTerms(*events, flow, reference_us, contrast, scale, .849 if holo else 1.)
+        plan = _EventTerms(*events, flow, reference_us, contrast, scale, SIGMA if holo else SIGMA_SR)
     sr_seed = _upsample(seed, scale)
     state, image, _, predicted, report["fits"]["sr"] = _fit(plan, edi, sr_seed, bg, distance_m, sr_steps)
     arrays = dict(edi=edi, background=bg, sr_seed=sr_seed, joint=image, iwe_measured=plan.target,
